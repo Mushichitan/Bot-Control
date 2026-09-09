@@ -1,0 +1,117 @@
+# Crypto Bot Control Center User Guide
+
+## Installation
+
+### Windows
+1. Install Python 3.10+ from python.org and enable "Add python.exe to PATH".
+2. Double-click `start.bat` in the application folder.
+3. The Control Center opens in your browser at http://127.0.0.1:8787.
+
+### From source
+```bash
+python3 -m pip install --break-system-packages -r backend/requirements.txt
+cd frontend && npm install && npm run build && cd ..
+python3 run.py
+```
+
+The desktop app and the bot project stay separate. Updating the app never rewrites your trading code.
+
+## First-time setup
+
+1. Open the app.
+2. Click **Add Bot**.
+3. Enter a name.
+4. Paste the full path of your Python bot **project folder** (not a single file).
+5. Click **Analyze**. Review detected entry points.
+6. Save the bot.
+7. Open **Settings -> Environment** and add secrets (or import a `.env` file into the vault).
+8. Choose PAPER, TESTNET, or LIVE.
+9. Click **Start**.
+
+## Adding a bot / importing a project
+
+The app copies the folder into a managed directory and keeps the original structure.
+
+Supported contents include multiple `.py` files, `requirements.txt`, `pyproject.toml`, strategy modules, and runtime assets.
+
+Analysis is static. The project is not executed until you press Start.
+
+If several entry points are found, you choose one.
+
+## Configuring .env / secrets
+
+Secrets live in an encrypted vault, not in the bot folder.
+
+- Add variables manually
+- Import a `.env` file
+- Values are masked in the UI
+- Required variables are validated before start
+- Logs, exports, and diagnostics redact secret values
+
+Do not paste API keys into chat or support tickets.
+
+A leftover plaintext `.env` inside the imported project produces a warning.
+
+## Paper / Testnet / Live
+
+The app does not silently change the bot's internal mode. Map a variable such as `TRADING_MODE` if the bot uses one.
+
+LIVE always shows a confirmation:
+
+> This bot may place real orders using configured exchange credentials.
+
+The app never asks for Binance withdrawal permission.
+
+## Starting and stopping
+
+- **Start / Stop / Restart** always verify process state
+- **Pause / Resume** appear only if the imported bot actually exposes those commands
+- Default policy: the bot stops when the app closes
+- Optional: keep the bot running when the app closes
+- Optional bounded auto-restart after crash (max 3 attempts / 5 minutes)
+
+Statuses: STOPPED, STARTING, RUNNING, PAUSED, STOPPING, CRASHED, ERROR, UPDATING
+
+## Telegram
+
+The Control Center does not replace Telegram. If the bot already sends messages, it keeps doing so.
+
+Detected commands (for example `/status`) are listed in Settings. Buttons are shown only for detected commands.
+
+## Bot version management
+
+When project files change, the app shows:
+
+- Current version
+- Added / modified / removed files
+- Activate new version
+- Rollback to a known-good snapshot
+
+Changed code is never auto-activated while LIVE.
+
+## Backups
+
+Settings -> Backup exports configuration, versions, and events. Secrets are excluded by default.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| Bot failed to start | Settings -> Validate. Missing env vars are named, not shown. |
+| Dependencies error | Install dependencies from Settings and read the error text |
+| No signals / positions | The bot must emit events (stdout `CBC_EVENT {json}` or supported log lines). The app never invents trades. |
+| LIVE blocked | Confirm the LIVE dialog |
+| Version activate blocked | Stop a LIVE bot before activating new code |
+| Crash loop | Auto-restart stops after 3 failures and shows ERROR |
+
+## Security notes
+
+- Secrets are encrypted locally; the vault key is stored separately from the database
+- No withdrawal workflow exists
+- Imported Python is untrusted executable code
+- Dependency installs are explicit
+- Log export redacts secrets
+
+## Updating the app
+
+App version and bot version are shown separately (for example App v1.0.0, Bot v1.0). App updates do not modify bot files.

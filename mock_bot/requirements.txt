@@ -1,0 +1,1 @@
+# Mock bot has no third-party dependencies.
