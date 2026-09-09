@@ -24,6 +24,11 @@ EVENT_TYPES = {
     "EXCHANGE_DISCONNECTED",
     "HEARTBEAT",
     "LOG",
+    "HEALTH_UPDATE",
+    "MARKET_UPDATE",
+    "ORDER_REJECTED",
+    "REPORT_HOURLY",
+    "REPORT_4H",
 }
 
 CATEGORY_MAP = {
@@ -45,9 +50,15 @@ CATEGORY_MAP = {
     "CANCELLED": "SYSTEM",
     "HEARTBEAT": "SYSTEM",
     "LOG": "SYSTEM",
+    "HEALTH_UPDATE": "SYSTEM",
+    "MARKET_UPDATE": "SYSTEM",
+    "ORDER_REJECTED": "BINANCE",
+    "REPORT_HOURLY": "SYSTEM",
+    "REPORT_4H": "SYSTEM",
 }
 
 CBC_PREFIX = "CBC_EVENT "
+DEMO_PREFIX = "DEMO_EVENT "
 
 
 def parse_structured_line(line: str) -> dict | None:
@@ -61,16 +72,26 @@ def parse_structured_line(line: str) -> dict | None:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             return None
-    elif text.startswith("{") and '"type"' in text:
+    elif text.startswith(DEMO_PREFIX):
+        raw = text[len(DEMO_PREFIX) :].strip()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    elif text.startswith("{") and ('"type"' in text or '"event"' in text):
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
             return None
     if not isinstance(payload, dict):
         return None
-    event_type = str(payload.get("type") or payload.get("event_type") or "").upper()
+    event_type = str(payload.get("type") or payload.get("event") or payload.get("event_type") or "").upper()
     if event_type not in EVENT_TYPES:
         return None
+    if "message" not in payload and payload.get("error"):
+        payload["message"] = str(payload.get("error"))
+    if "message" not in payload and payload.get("text"):
+        payload["message"] = str(payload.get("text"))
     payload["type"] = event_type
     payload["category"] = CATEGORY_MAP.get(event_type, "SYSTEM")
     return payload
@@ -160,5 +181,9 @@ def format_activity_message(event: dict) -> str:
         extra = f" P&L {pnl:+.2f} USDT" if isinstance(pnl, (int, float)) else ""
         return f"SL HIT {symbol}{extra}".strip()
     if t == "TELEGRAM_SENT":
-        return event.get("message") or "TELEGRAM Notification sent"
+        return event.get("message") or event.get("text") or "TELEGRAM Notification sent"
+    if t == "ORDER_REJECTED":
+        return event.get("message") or f"ORDER rejected {event.get('reason') or ''}".strip()
+    if t in {"REPORT_HOURLY", "REPORT_4H"}:
+        return event.get("message") or f"{t} realized {event.get('realized_pnl')} unrealized {event.get('unrealized_pnl')}"
     return event.get("message") or t

@@ -368,6 +368,44 @@ def test_parse_structured_and_heuristic():
     assert heur["symbol"] == "BTCUSDT"
 
 
+def test_parse_demo_event():
+    line = 'DEMO_EVENT {"event":"SIGNAL_GENERATED","symbol":"BTCUSDT","side":"LONG","entry":67000,"tp":67536,"sl":66665}'
+    parsed = parse_line(line)
+    assert parsed["type"] == "SIGNAL_GENERATED"
+    assert parsed["symbol"] == "BTCUSDT"
+    health = parse_line('DEMO_EVENT {"event":"HEALTH_UPDATE","exchange":"SIMULATED","telegram":"SIMULATED"}')
+    assert health["type"] == "HEALTH_UPDATE"
+
+
+def test_demo_bot_import():
+    demo = Path(__file__).resolve().parents[2] / "demo_bot"
+    with session_scope() as s:
+        bot = services.import_bot(s, "Demo Trading Bot", str(demo), entry_point="main.py")
+        assert bot["entry_point"] == "main.py"
+        analysis = bot["analysis"]
+        assert "main.py" in analysis["entry_points"]
+        assert "strategy.py" in analysis["python_files"]
+
+
+def test_demo_bot_start_emits_events():
+    with session_scope() as s:
+        bot = services.ensure_demo_bot(s)
+        assert bot is not None
+        started = services.start_bot(s, bot["id"])
+        assert started["status"] == "RUNNING"
+    time.sleep(3.5)
+    with session_scope() as s:
+        from crypto_bot_control.database import Event, Position, Signal
+        bid = bot["id"]
+        events = s.query(Event).filter(Event.bot_id == bid).all()
+        signals = s.query(Signal).filter(Signal.bot_id == bid).all()
+        services.stop_bot(s, bid)
+        assert any(e.event_type == "BOT_STARTED" for e in events)
+        assert len(events) >= 3
+        assert len(signals) >= 0
+
+
+
 def test_analysis_does_not_execute(tmp_path, monkeypatch):
     ran = {"v": False}
     project = tmp_path / "proj"
@@ -400,6 +438,33 @@ def test_stdout_events_from_running_mock(mock_bot_path):
         assert len(events) >= 1
         assert any(e.event_type == "BOT_STARTED" for e in events)
     assert len(signals) >= 1 or len(positions) >= 1 or len(events) >= 2
+
+
+def test_positions_api_handles_naive_opened_at(mock_bot_path):
+    from crypto_bot_control.api import api_positions
+    from crypto_bot_control.database import Position
+    from datetime import datetime
+
+    with session_scope() as s:
+        bot = _ready_bot(s, mock_bot_path, "Tz Bot")
+        bid = bot["id"]
+        s.add(
+            Position(
+                bot_id=bid,
+                display_number=1,
+                external_id="1",
+                symbol="BTCUSDT",
+                side="LONG",
+                entry_price=100,
+                status="OPEN",
+                opened_at=datetime(2026, 9, 9, 12, 0, 0),
+            )
+        )
+        s.flush()
+        s.commit()
+    rows = api_positions(bid)
+    assert rows[0]["number"] == "#001"
+    assert rows[0]["duration_seconds"] is not None
 
 
 def test_pause_hidden_unless_supported(mock_bot_path):

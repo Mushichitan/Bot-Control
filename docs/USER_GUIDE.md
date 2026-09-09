@@ -22,6 +22,7 @@ The desktop app and the bot project stay separate. Updating the app never rewrit
 2. Click **Add Bot**.
 3. Enter a name.
 4. Paste the full path of your Python bot **project folder** (not a single file).
+   In this cloud workspace use a server path such as `/workspace/demo_bot`.
 5. Click **Analyze**. Review detected entry points.
 6. Save the bot.
 7. Open **Settings -> Environment** and add secrets (or import a `.env` file into the vault).

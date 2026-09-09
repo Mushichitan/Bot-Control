@@ -11,8 +11,9 @@ from pathlib import Path
 import uvicorn
 
 from .config import APP_NAME, APP_VERSION, ensure_dirs
-from .database import get_engine
+from .database import get_engine, session_scope
 from .api import app, mount_frontend
+from . import services as bot_services
 
 
 def _frontend_dir() -> Path:
@@ -31,6 +32,11 @@ def _frontend_dir() -> Path:
 def create_app():
     ensure_dirs()
     get_engine()
+    try:
+        with session_scope() as session:
+            bot_services.ensure_demo_bot(session)
+    except BaseException:
+        pass
     static = _frontend_dir()
     if (static / "index.html").exists():
         mount_frontend(static)

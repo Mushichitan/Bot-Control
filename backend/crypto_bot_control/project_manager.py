@@ -113,9 +113,9 @@ def create_venv(venv_path: Path) -> str:
     if Path(py).exists():
         return py
     try:
-        builder = venv.EnvBuilder(with_pip=True, clear=False)
+        builder = venv.EnvBuilder(with_pip=False, clear=False)
         builder.create(str(venv_path))
-    except Exception:
+    except BaseException:
         return sys.executable
     py = venv_python(venv_path)
     return py if Path(py).exists() else sys.executable

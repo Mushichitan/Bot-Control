@@ -307,7 +307,18 @@ def decrypted_env(session: Session, bot_id: int) -> dict[str, str]:
 
 
 def secret_values_for(session: Session, bot_id: int) -> list[str]:
-    return [v for v in decrypted_env(session, bot_id).values() if v and len(v) >= 4]
+    rows = session.query(EnvVar).filter(EnvVar.bot_id == bot_id, EnvVar.is_secret.is_(True)).all()
+    values = []
+    for row in rows:
+        if not row.encrypted_value:
+            continue
+        try:
+            val = _vault.decrypt(row.encrypted_value)
+        except Exception:
+            continue
+        if val and len(val) >= 8:
+            values.append(val)
+    return values
 
 
 def _refresh_env_status(session: Session, bot: Bot) -> None:
@@ -405,6 +416,11 @@ def _on_exit(bot_id: int, code: int | None) -> None:
         if bot.status in {"STOPPING", "UPDATING"}:
             bot.status = "STOPPED"
             ingest_event(session, bot_id, {"type": "BOT_STOPPED", "message": "Bot stopped"}, source="controller")
+            return
+        if code in (-15, -2, 15, 130, 143):
+            bot.status = "STOPPED"
+            bot.last_error = ""
+            ingest_event(session, bot_id, {"type": "BOT_STOPPED", "message": "Bot process ended"}, source="controller")
             return
         bot.status = "CRASHED"
         bot.last_error = f"process exited with code {code}"
@@ -554,6 +570,12 @@ def ingest_event(session: Session, bot_id: int, payload: dict, source: str = "bo
             bot.binance_status = "DISCONNECTED"
         elif event_type == "TELEGRAM_SENT":
             bot.telegram_status = "CONNECTED"
+        elif event_type == "HEALTH_UPDATE":
+            bot.binance_status = _health_status(payload.get("exchange"))
+            bot.telegram_status = _health_status(payload.get("telegram"))
+            bot.env_status = bot.env_status or "VALID"
+            if payload.get("dependencies"):
+                bot.deps_status = _health_status(payload.get("dependencies"))
         elif event_type == "BOT_ERROR":
             bot.last_error = message
     _apply_trading_event(session, bot_id, payload)
@@ -673,6 +695,15 @@ def _find_position(session: Session, bot_id: int, payload: dict) -> Position | N
     )
 
 
+def _health_status(val: Any) -> str:
+    text = str(val or "").upper()
+    if text in {"OK", "CONNECTED", "SIMULATED", "READY", "HEALTHY", "VALID"}:
+        return "CONNECTED" if text in {"OK", "CONNECTED", "SIMULATED", "HEALTHY"} else text
+    if text in {"ERROR", "INVALID", "DISCONNECTED", "FAILED"}:
+        return "DISCONNECTED" if text in {"ERROR", "FAILED", "DISCONNECTED"} else text
+    return "UNKNOWN"
+
+
 def _num(val: Any) -> float | None:
     if val is None or val == "":
         return None
@@ -687,10 +718,17 @@ def _ts(val: Any) -> datetime | None:
         return None
     if isinstance(val, datetime):
         return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    if isinstance(val, (int, float)):
+        if val > 1e12:
+            val = val / 1000.0
+        return datetime.fromtimestamp(val, tz=timezone.utc)
     try:
         return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
     except ValueError:
-        return None
+        try:
+            return datetime.fromtimestamp(float(val), tz=timezone.utc)
+        except (TypeError, ValueError):
+            return None
 
 
 def detect_changes(session: Session, bot_id: int) -> dict:
@@ -861,3 +899,29 @@ def telegram_commands(session: Session, bot_id: int) -> list[str]:
     bot = _bot_or_404(session, bot_id)
     analysis = json.loads(bot.analysis_json or "{}")
     return analysis.get("capabilities", {}).get("telegram_commands") or []
+
+
+DEMO_ENV_DEFAULTS = {
+    "BOT_NAME": "Demo Trading Bot",
+    "TRADING_MODE": "PAPER",
+    "SYMBOL": "BTCUSDT",
+    "CYCLE_SECONDS": "1",
+    "INITIAL_BALANCE": "10000",
+    "POSITION_SIZE_USDT": "500",
+    "TP_PERCENT": "0.8",
+    "SL_PERCENT": "0.5",
+    "REPORT_INTERVAL_SECONDS": "20",
+}
+
+
+def ensure_demo_bot(session: Session) -> dict | None:
+    existing = session.query(Bot).filter(Bot.name == "Demo Trading Bot").first()
+    if existing:
+        return bot_to_dict(existing, session)
+    demo_path = Path(__file__).resolve().parents[2] / "demo_bot"
+    if not demo_path.exists():
+        return None
+    bot = import_bot(session, "Demo Trading Bot", str(demo_path), entry_point="main.py")
+    for key, value in DEMO_ENV_DEFAULTS.items():
+        set_env_var(session, bot["id"], key, value, is_secret=False, is_required=False)
+    return bot_to_dict(session.get(Bot, bot["id"]), session)

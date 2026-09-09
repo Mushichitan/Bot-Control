@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -28,6 +29,14 @@ app.add_middleware(
 
 def db() -> Session:
     return get_session()
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class ImportBody(BaseModel):
@@ -327,8 +336,8 @@ def api_positions(bot_id: int, status: str | None = None):
         rows = q.order_by(Position.display_number.desc()).all()
         out = []
         for r in rows:
-            opened = r.opened_at
-            closed = r.closed_at
+            opened = _aware(r.opened_at)
+            closed = _aware(r.closed_at)
             duration = None
             if opened:
                 end = closed or utcnow()
