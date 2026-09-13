@@ -119,7 +119,9 @@ input, select, textarea {
   padding: 8px 10px;
   width: 100%;
 }
+input[type="checkbox"], input[type="radio"] { width: auto; flex: none; }
 label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
+label.row { margin-top: 10px; }
 .feed { max-height: 280px; overflow: auto; font-size: 13px; }
 .feed div, .log { padding: 6px 0; border-bottom: 1px solid rgba(42, 53, 88, 0.5); }
 .log { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
@@ -128,11 +130,16 @@ label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px;
   display: flex; align-items: center; justify-content: center;
 }
 .modal { width: min(560px, 92vw); }
-.row { display: flex; gap: 8px; align-items: center; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row input, .row select { width: auto; flex: 1; min-width: 72px; }
+.row .btn { flex: 0 0 auto; white-space: nowrap; }
 .muted { color: var(--muted); }
 .kpi { font-size: 28px; font-weight: 750; }
 .warn-box { background: rgba(255, 93, 115, 0.12); border: 1px solid var(--red); padding: 12px; border-radius: 12px; }
+.notice-box { background: rgba(61, 220, 151, 0.12); border: 1px solid var(--green); padding: 12px; border-radius: 12px; }
+.help { color: var(--muted); font-size: 12px; margin: 0 0 8px; line-height: 1.45; }
 .empty { color: var(--muted); padding: 24px 0; }
+.code-edit { font-family: ui-monospace, Consolas, monospace; font-size: 12px; min-height: 220px; }
 @media (max-width: 1100px) {
   .cards, .grid-2, .grid-3 { grid-template-columns: 1fr; }
   .sidebar { width: 188px; }

@@ -20,6 +20,8 @@ SKIP_DIRS = {
     ".pytest_cache",
     "dist",
     "build",
+    ".strategy_backups",
+    ".cbc",
 }
 
 ENV_NAME_RE = re.compile(r"""os\.environ(?:\.get)?\(\s*['"]([A-Z0-9_]+)['"]""")

@@ -126,6 +126,7 @@ class Signal(Base):
     execution_status: Mapped[str] = mapped_column(String(20), default="GENERATED")
     telegram_status: Mapped[str] = mapped_column(String(20), default="UNKNOWN")
     binance_status: Mapped[str] = mapped_column(String(20), default="UNKNOWN")
+    tps_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
@@ -144,6 +145,7 @@ class Position(Base):
     quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
     tp: Mapped[float | None] = mapped_column(Float, nullable=True)
     sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tps_json: Mapped[str] = mapped_column(Text, default="[]")
     unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -235,8 +237,25 @@ def get_engine(db_path=None):
             cursor.close()
 
         _SessionLocal = sessionmaker(bind=_engine, autoflush=True, autocommit=False, expire_on_commit=False)
-        Base.metadata.create_all(_engine)
+        try:
+            Base.metadata.create_all(_engine, checkfirst=True)
+        except Exception:
+            pass
+        _ensure_extra_columns(_engine)
     return _engine
+
+
+def _ensure_extra_columns(engine) -> None:
+    extras = (
+        ("signals", "tps_json", "TEXT"),
+        ("positions", "tps_json", "TEXT"),
+    )
+    with engine.begin() as conn:
+        for table, column, coltype in extras:
+            info = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            names = {row[1] for row in info}
+            if column not in names:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
 def get_session() -> Session:

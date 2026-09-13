@@ -90,6 +90,21 @@ When project files change, the app shows:
 
 Changed code is never auto-activated while LIVE.
 
+Settings also lets you edit strategy files (save, clean comments, delete) with a local backup. Saving does not auto-activate a LIVE running bot.
+
+## Scan, delay, and take profits
+
+Settings -> Scan / Delay / Take profits:
+
+- Scan mode: ALL SUPPORTED loads live Binance USD-M perpetual symbols from `fapi.binance.com/fapi/v1/exchangeInfo` plus researched US TradFi contracts. Prices come from `fapi.binance.com/fapi/v1/ticker/price` and klines; no fake prices and no coin-select list. Binance Futures and US TradFi can be chosen as the scan universe. If Binance is unreachable, scanning stops instead of inventing prices.
+- Open position limit: 1-20 concurrent positions (presets 1 / 2 / 3 / 5 / 10, default 3). New signals are rejected after the limit until a position closes.
+- Startup delay: 3 / 5 / 10 minutes or custom seconds (default 3 minutes). Existing open positions stay manageable during the wait.
+- Trade gap: wait after a close before the next new trade (3 / 5 / 10 minutes or custom)
+- Take-profit count: 1 to 5 levels. Live signals use Hermis ATR stops and take-profits from Binance 15m klines, not dummy percents.
+- Reset all data: clears signals, positions, trades, events, reports, and logs for that bot. Stop the bot first. Strategy files and secrets are kept.
+
+Restart the bot after changing scan, limit, delay, gap, or TP values.
+
 ## Backups
 
 Settings -> Backup exports configuration, versions, and events. Secrets are excluded by default.

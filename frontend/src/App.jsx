@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 const NAV = ["Dashboard", "Positions", "Signals", "Activity", "Reports", "Settings"];
 
@@ -30,6 +30,11 @@ function duration(seconds) {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function fmtTps(tps, fallback) {
+  if (Array.isArray(tps) && tps.length) return tps.map((n) => fmt(n)).join(" / ");
+  return fmt(fallback);
 }
 
 async function api(path, opts = {}) {
@@ -80,11 +85,14 @@ export default function App() {
   const [versions, setVersions] = useState([]);
   const [changes, setChanges] = useState(null);
   const [commands, setCommands] = useState([]);
+  const [strategyFiles, setStrategyFiles] = useState([]);
+  const [runtime, setRuntime] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [showLive, setShowLive] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [busyKind, setBusyKind] = useState("");
 
   const loadBots = useCallback(async () => {
     const list = await api("/api/bots");
@@ -98,7 +106,7 @@ export default function App() {
       return;
     }
     try {
-      const [b, h, sig, pos, ev, lg, p, hr, fh, env, ver, ch, cmd] = await Promise.all([
+      const [b, h, sig, pos, ev, lg, p, hr, fh, env, ver, ch, cmd, files, rt] = await Promise.all([
         api(`/api/bots/${botId}`),
         api(`/api/health?bot_id=${botId}`),
         api(`/api/bots/${botId}/signals`),
@@ -112,6 +120,8 @@ export default function App() {
         api(`/api/bots/${botId}/versions`),
         api(`/api/bots/${botId}/changes`),
         api(`/api/bots/${botId}/telegram/commands`),
+        api(`/api/bots/${botId}/strategy/files`),
+        api(`/api/bots/${botId}/runtime-settings`),
       ]);
       setBot(b);
       setHealth(h);
@@ -126,6 +136,8 @@ export default function App() {
       setVersions(ver);
       setChanges(ch);
       setCommands(cmd);
+      setStrategyFiles(files);
+      setRuntime(rt);
       setError("");
     } catch (e) {
       setError(e.message);
@@ -149,34 +161,57 @@ export default function App() {
   async function control(kind) {
     if (!botId) return;
     setBusy(true);
+    setBusyKind(kind);
+    setError("");
+    const labels = { start: "Starting bot…", stop: "Stopping bot…", restart: "Restarting bot…", pause: "Pausing bot…", resume: "Resuming bot…" };
+    setNotice(labels[kind] || `${kind}…`);
     try {
       if (kind === "start" && bot?.trading_mode === "LIVE") {
         setShowLive(true);
+        setNotice("LIVE confirmation required");
         return;
       }
-      await api(`/api/bots/${botId}/${kind}`, { method: "POST", body: "{}" });
+      const r = await api(`/api/bots/${botId}/${kind}`, { method: "POST", body: "{}" });
+      await loadBots();
       await refresh();
+      const status = r?.status || "";
+      if (kind === "start") setNotice(status === "RUNNING" ? "Bot started." : `Start requested (${status || "unknown"}).`);
+      else if (kind === "stop") setNotice(status === "STOPPED" ? "Bot stopped." : `Stop requested (${status || "unknown"}).`);
+      else if (kind === "restart") setNotice(status === "RUNNING" ? "Bot restarted." : `Restart requested (${status || "unknown"}).`);
+      else setNotice(`${kind} done (${status || "ok"}).`);
     } catch (e) {
-      if (String(e.message).includes("LIVE_CONFIRMATION_REQUIRED")) setShowLive(true);
-      else setError(e.message);
+      if (String(e.message).includes("LIVE_CONFIRMATION_REQUIRED")) {
+        setShowLive(true);
+        setNotice("LIVE confirmation required");
+      } else {
+        setError(e.message);
+        setNotice("");
+      }
     } finally {
       setBusy(false);
+      setBusyKind("");
     }
   }
 
   async function confirmLive() {
     setBusy(true);
+    setBusyKind("start");
+    setNotice("Starting LIVE bot…");
     try {
       await api(`/api/bots/${botId}/start`, {
         method: "POST",
         body: JSON.stringify({ live_confirmed: true }),
       });
       setShowLive(false);
+      await loadBots();
       await refresh();
+      setNotice("LIVE bot started.");
     } catch (e) {
       setError(e.message);
+      setNotice("");
     } finally {
       setBusy(false);
+      setBusyKind("");
     }
   }
 
@@ -215,9 +250,9 @@ export default function App() {
             </div>
           </div>
           <div className="controls">
-            <button className="btn primary" disabled={busy || !bot} onClick={() => control("start")}>Start</button>
-            <button className="btn danger" disabled={busy || !bot} onClick={() => control("stop")}>Stop</button>
-            <button className="btn ghost" disabled={busy || !bot} onClick={() => control("restart")}>Restart</button>
+            <button className="btn primary" disabled={busy || !bot} onClick={() => control("start")}>{busyKind === "start" ? "Starting…" : "Start"}</button>
+            <button className="btn danger" disabled={busy || !bot} onClick={() => control("stop")}>{busyKind === "stop" ? "Stopping…" : "Stop"}</button>
+            <button className="btn ghost" disabled={busy || !bot} onClick={() => control("restart")}>{busyKind === "restart" ? "Restarting…" : "Restart"}</button>
             {bot?.pause_supported ? (
               <>
                 <button className="btn ghost" disabled={busy} onClick={() => control("pause")}>Pause</button>
@@ -228,13 +263,13 @@ export default function App() {
         </header>
         <div className="page">
           {error ? <div className="warn-box" style={{ marginBottom: 12 }}>{error}</div> : null}
-          {notice ? <div className="panel" style={{ marginBottom: 12 }}>{notice}</div> : null}
+          {notice ? <div className="notice-box" style={{ marginBottom: 12 }}>{notice}</div> : null}
           {!bot ? (
             <div className="panel empty">Import a Python trading-bot project to get started. The app never invents trading logic.</div>
           ) : page === "Dashboard" ? (
-            <Dashboard bot={bot} health={health} today={today} open={open} signals={signals} events={events} logs={logs} />
+            <Dashboard bot={bot} health={health} today={today} open={open} signals={signals} events={events} logs={logs} botId={botId} runtime={runtime} onRefresh={refresh} setError={setError} setNotice={setNotice} />
           ) : page === "Positions" ? (
-            <Positions open={open} closed={closed} />
+            <Positions open={open} closed={closed} botId={botId} onRefresh={refresh} setError={setError} setNotice={setNotice} />
           ) : page === "Signals" ? (
             <Signals signals={signals} />
           ) : page === "Activity" ? (
@@ -248,6 +283,8 @@ export default function App() {
               versions={versions}
               changes={changes}
               commands={commands}
+              strategyFiles={strategyFiles}
+              runtime={runtime}
               onRefresh={async () => {
                 await loadBots();
                 await refresh();
@@ -275,8 +312,11 @@ export default function App() {
   );
 }
 
-function Dashboard({ bot, health, today, open, signals, events, logs }) {
+function Dashboard({ bot, health, today, open, signals, events, logs, botId, runtime, onRefresh, setError, setNotice }) {
   const uptime = bot.last_heartbeat ? new Date(bot.last_heartbeat).toLocaleTimeString() : "—";
+  const delayEvt = [...events].reverse().find((e) => e.type === "STARTUP_DELAY");
+  const gapEvt = [...events].reverse().find((e) => e.type === "TRADE_COOLDOWN");
+  const scanEvt = [...events].reverse().find((e) => e.type === "SCAN_UNIVERSE");
   return (
     <>
       <div className="cards">
@@ -292,24 +332,37 @@ function Dashboard({ bot, health, today, open, signals, events, logs }) {
           <div className="muted">Unrealized {fmt(today.unrealized_pnl)} · Total {fmt(today.total_pnl)} · Win rate {fmt(today.win_rate, 1)}%</div>
         </div>
         <div className="panel">
-          <h3>Health</h3>
-          <div>Database <span className={`badge ${badgeClass(health.database)}`}>{health.database}</span></div>
-          <div style={{ marginTop: 8 }}>Mode <span className={`badge ${badgeClass(bot.trading_mode)}`}>{bot.trading_mode}</span></div>
-          {bot.last_error ? <div className="err" style={{ marginTop: 8 }}>{bot.last_error}</div> : null}
+          <h3>Market scan</h3>
+          <div>{runtime?.universe_label || runtime?.scan_mode || "ALL"}</div>
+          <div className="muted">Symbols {runtime?.all_symbol_count || 0} · Crypto {runtime?.crypto_symbol_count || 0} · TradFi {runtime?.tradfi_symbol_count || 0}</div>
+          <div className="muted" style={{ marginTop: 8 }}>Startup delay {runtime?.startup_delay_seconds || 0}s · Trade gap {runtime?.trade_gap_seconds || 0}s</div>
+          {scanEvt ? <div className="muted" style={{ marginTop: 8 }}>{scanEvt.message}</div> : null}
+          {delayEvt ? <div className="muted">{delayEvt.message}</div> : null}
+          {gapEvt ? <div className="muted">{gapEvt.message}</div> : null}
         </div>
       </div>
       <div className="grid-3" style={{ marginTop: 12 }}>
         <div className="panel">
           <h3>Recent signals</h3>
           {signals.slice(0, 6).map((s) => (
-            <div key={s.id}>{s.symbol} {s.side} {s.execution_status}</div>
+            <div key={s.id}>{s.symbol} {s.side} TP {fmtTps(s.tps, s.tp)} {s.execution_status}</div>
           ))}
           {!signals.length ? <div className="muted">No signals yet</div> : null}
         </div>
         <div className="panel">
           <h3>Open positions</h3>
           {open.slice(0, 6).map((p) => (
-            <div key={p.id}>{p.number} {p.symbol} {p.side} <span className={pnlClass(p.unrealized_pnl)}>{fmt(p.unrealized_pnl)}</span></div>
+            <div key={p.id} className="row">
+              <div>{p.number} {p.symbol} {p.side} <span className={pnlClass(p.unrealized_pnl)}>{fmt(p.unrealized_pnl)}</span></div>
+              <button className="btn danger" onClick={async () => {
+                try {
+                  setNotice(`Closing ${p.number} ${p.symbol}…`);
+                  await api(`/api/bots/${botId}/positions/${p.id}/close`, { method: "POST", body: JSON.stringify({ reason: "MANUAL" }) });
+                  setNotice(`Closed ${p.number} ${p.symbol}`);
+                  if (onRefresh) await onRefresh();
+                } catch (e) { setError(e.message); }
+              }}>Close</button>
+            </div>
           ))}
           {!open.length ? <div className="muted">No open positions</div> : null}
         </div>
@@ -334,12 +387,12 @@ function Dashboard({ bot, health, today, open, signals, events, logs }) {
   );
 }
 
-function Positions({ open, closed }) {
+function Positions({ open, closed, botId, onRefresh, setError, setNotice }) {
   return (
     <div className="grid-2">
       <div className="panel">
         <h3>Open</h3>
-        <PosTable rows={open} open />
+        <PosTable rows={open} open botId={botId} onRefresh={onRefresh} setError={setError} setNotice={setNotice} />
       </div>
       <div className="panel">
         <h3>Closed — TP/SL remain visible</h3>
@@ -349,8 +402,26 @@ function Positions({ open, closed }) {
   );
 }
 
-function PosTable({ rows, open }) {
+function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
+  const [busyId, setBusyId] = useState(null);
   if (!rows.length) return <div className="empty">None</div>;
+  async function closePos(p) {
+    if (!botId) return;
+    setBusyId(p.id);
+    try {
+      setNotice(`Closing ${p.number} ${p.symbol}…`);
+      await api(`/api/bots/${botId}/positions/${p.id}/close`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "MANUAL" }),
+      });
+      setNotice(`Closed ${p.number} ${p.symbol}`);
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
   return (
     <table>
       <thead>
@@ -358,6 +429,7 @@ function PosTable({ rows, open }) {
           <th>#</th><th>Symbol</th><th>Side</th><th>Entry</th>
           <th>{open ? "Current" : "Exit"}</th><th>TP</th><th>SL</th>
           <th>P&L</th><th>Reason</th><th>Dur</th>
+          {open ? <th></th> : null}
         </tr>
       </thead>
       <tbody>
@@ -368,13 +440,18 @@ function PosTable({ rows, open }) {
             <td>{p.side}</td>
             <td>{fmt(p.entry)}</td>
             <td>{fmt(open ? p.current_price : p.exit)}</td>
-            <td>{fmt(p.tp)}</td>
+            <td>{fmtTps(p.tps, p.tp)}</td>
             <td>{fmt(p.sl)}</td>
             <td className={pnlClass(open ? p.unrealized_pnl : p.realized_pnl)}>
               {fmt(open ? p.unrealized_pnl : p.realized_pnl)}
             </td>
             <td>{p.close_reason || p.status}</td>
             <td>{duration(p.duration_seconds)}</td>
+            {open ? (
+              <td>
+                <button className="btn danger" disabled={busyId === p.id} onClick={() => closePos(p)}>Close</button>
+              </td>
+            ) : null}
           </tr>
         ))}
       </tbody>
@@ -389,7 +466,7 @@ function Signals({ signals }) {
       <table>
         <thead>
           <tr>
-            <th>ID</th><th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>TP</th><th>SL</th>
+            <th>ID</th><th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>TPs</th><th>SL</th>
             <th>Conf</th><th>Strategy</th><th>Status</th><th>TG</th><th>EX</th>
           </tr>
         </thead>
@@ -401,7 +478,7 @@ function Signals({ signals }) {
               <td>{s.symbol}</td>
               <td>{s.side}</td>
               <td>{fmt(s.entry)}</td>
-              <td>{fmt(s.tp)}</td>
+              <td>{fmtTps(s.tps, s.tp)}</td>
               <td>{fmt(s.sl)}</td>
               <td>{fmt(s.confidence, 2)}</td>
               <td>{s.strategy || "—"}</td>
@@ -497,7 +574,7 @@ function Reports({ pnl, hourly, fourHour }) {
   );
 }
 
-function Settings({ bot, envVars, versions, changes, commands, onRefresh, setError, setNotice }) {
+function Settings({ bot, envVars, versions, changes, commands, strategyFiles, runtime, onRefresh, setError, setNotice }) {
   const [mode, setMode] = useState(bot.trading_mode);
   const [entry, setEntry] = useState(bot.entry_point);
   const [key, setKey] = useState("");
@@ -542,24 +619,38 @@ function Settings({ bot, envVars, versions, changes, commands, onRefresh, setErr
         <select
           value={bot.keep_running_on_app_close ? "yes" : "no"}
           onChange={async (e) => {
-            await api(`/api/bots/${bot.id}`, { method: "PATCH", body: JSON.stringify({ keep_running_on_app_close: e.target.value === "yes" }) });
-            onRefresh();
+            try {
+              await api(`/api/bots/${bot.id}`, { method: "PATCH", body: JSON.stringify({ keep_running_on_app_close: e.target.value === "yes" }) });
+              onRefresh();
+            } catch (err) { setError(err.message); }
           }}
         >
           <option value="no">Stop bot when app closes (default)</option>
           <option value="yes">Keep bot running when app closes</option>
         </select>
         <label>Auto-restart after crash (bounded)</label>
-        <select
-          value={bot.auto_restart ? "yes" : "no"}
-          onChange={async (e) => {
-            await api(`/api/bots/${bot.id}`, { method: "PATCH", body: JSON.stringify({ auto_restart: e.target.value === "yes" }) });
-            onRefresh();
-          }}
-        >
-          <option value="no">Off</option>
-          <option value="yes">On (max 3 / 5 min)</option>
-        </select>
+        <div className="row">
+          <button
+            className={`btn ${bot.auto_restart ? "ghost" : "primary"}`}
+            onClick={async () => {
+              try {
+                await api(`/api/bots/${bot.id}`, { method: "PATCH", body: JSON.stringify({ auto_restart: false }) });
+                setNotice("Auto-restart off");
+                onRefresh();
+              } catch (err) { setError(err.message); }
+            }}
+          >Off</button>
+          <button
+            className={`btn ${bot.auto_restart ? "primary" : "ghost"}`}
+            onClick={async () => {
+              try {
+                await api(`/api/bots/${bot.id}`, { method: "PATCH", body: JSON.stringify({ auto_restart: true }) });
+                setNotice("Auto-restart on (max 3 / 5 min)");
+                onRefresh();
+              } catch (err) { setError(err.message); }
+            }}
+          >On (max 3 / 5 min)</button>
+        </div>
         <p className="muted">Imported Python code can execute with your account permissions. Analysis is static.</p>
       </div>
       <div className="panel">
@@ -628,6 +719,282 @@ function Settings({ bot, envVars, versions, changes, commands, onRefresh, setErr
           setNotice(`${r.warning} Saved to ${r.path}`);
         }}>Backup (secrets excluded)</button>
       </div>
+      <RuntimePanel bot={bot} runtime={runtime} onRefresh={onRefresh} setError={setError} setNotice={setNotice} />
+      <StrategyPanel bot={bot} files={strategyFiles || []} onRefresh={onRefresh} setError={setError} setNotice={setNotice} />
+    </div>
+  );
+}
+
+function percentsForCount(count, current) {
+  const parts = String(current || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const n = Number(count) || 1;
+  if (parts.length >= n) return parts.slice(0, n).join(",");
+  const base = Number(parts[0] || 0.8) || 0.8;
+  const out = [...parts];
+  while (out.length < n) out.push(String((base * (out.length + 1)).toFixed(4)));
+  return out.join(",");
+}
+
+function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
+  const [scanMode, setScanMode] = useState("ALL");
+  const [symbols, setSymbols] = useState("");
+  const [delay, setDelay] = useState(180);
+  const [gap, setGap] = useState(180);
+  const [tpCount, setTpCount] = useState(2);
+  const [tpPercents, setTpPercents] = useState("0.8,1.6");
+  const [sl, setSl] = useState(0.5);
+  const [maxOpen, setMaxOpen] = useState(3);
+  const [loadedFor, setLoadedFor] = useState(null);
+
+  useEffect(() => {
+    if (!runtime) return;
+    if (loadedFor === bot.id) return;
+    setScanMode(runtime.scan_mode || "ALL");
+    setSymbols((runtime.symbols || []).join(","));
+    setDelay(runtime.startup_delay_seconds ?? 180);
+    setGap(runtime.trade_gap_seconds ?? 180);
+    setTpCount(runtime.tp_count ?? 2);
+    setTpPercents((runtime.tp_percents || [0.8, 1.6]).join(","));
+    setSl(runtime.sl_percent ?? 0.5);
+    setMaxOpen(runtime.max_open_positions ?? 3);
+    setLoadedFor(bot.id);
+  }, [bot.id, runtime, loadedFor]);
+
+  async function persist(patch, notice) {
+    const body = {
+      scan_mode: scanMode,
+      symbols,
+      startup_delay_seconds: Number(delay),
+      trade_gap_seconds: Number(gap),
+      tp_count: Number(tpCount),
+      tp_percents: tpPercents,
+      sl_percent: Number(sl),
+      max_open_positions: Number(maxOpen),
+      ...patch,
+    };
+    try {
+      const saved = await api(`/api/bots/${bot.id}/runtime-settings`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setScanMode(saved.scan_mode);
+      setSymbols((saved.symbols || []).join(","));
+      setDelay(saved.startup_delay_seconds);
+      setGap(saved.trade_gap_seconds);
+      setTpCount(saved.tp_count);
+      setTpPercents((saved.tp_percents || []).join(","));
+      setSl(saved.sl_percent);
+      setMaxOpen(saved.max_open_positions ?? 3);
+      const extra = saved.all_symbol_count ? ` Universe ${saved.all_symbol_count} (${saved.universe_label || saved.scan_mode}).` : "";
+      setNotice((notice || "Settings saved. Restart the bot to apply.") + extra);
+      onRefresh();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <h3>Scan / Delay / Take profits</h3>
+      <label>Market scan</label>
+      <p className="help">Every listed Binance USD-M futures + TradFi contract is scanned. Prices come from the Binance public ticker, never random. Restart the bot after changing this.</p>
+      <div className="row">
+        <button className={`btn ${scanMode === "ALL" ? "primary" : "ghost"}`} onClick={() => persist({ scan_mode: "ALL", refresh_universe: true }, "Scan mode: Binance Futures + US TradFi")}>ALL SUPPORTED</button>
+        <button className={`btn ${scanMode === "BINANCE" ? "primary" : "ghost"}`} onClick={() => persist({ scan_mode: "BINANCE", refresh_universe: true }, "Scan mode: Binance Futures")}>Binance Futures</button>
+        <button className={`btn ${scanMode === "TRADFI" ? "primary" : "ghost"}`} onClick={() => persist({ scan_mode: "TRADFI", refresh_universe: true }, "Scan mode: US TradFi")}>US TradFi</button>
+      </div>
+      <p className="muted">{runtime?.universe_label || scanMode} · {runtime?.all_symbol_count || 0} symbols · crypto {runtime?.crypto_symbol_count || 0} · tradfi {runtime?.tradfi_symbol_count || 0}{runtime?.all_symbols?.length ? ` · sample ${runtime.all_symbols.slice(0, 8).join(", ")}` : ""}{runtime?.scan_error ? ` · ${runtime.scan_error}` : ""}</p>
+      <label>Open position limit</label>
+      <p className="help">Maximum concurrent open positions. New signals are rejected after this limit until a position closes.</p>
+      <div className="row">
+        {[1, 2, 3, 5, 10].map((n) => (
+          <button key={n} className={`btn ${Number(maxOpen) === n ? "primary" : "ghost"}`} onClick={() => persist({ max_open_positions: n }, `Position limit ${n}`)}>{n}</button>
+        ))}
+        <input type="number" min="1" max="20" value={maxOpen} onChange={(e) => setMaxOpen(e.target.value)} onBlur={() => persist({ max_open_positions: Number(maxOpen) }, `Position limit ${maxOpen}`)} />
+      </div>
+      <label>Startup delay</label>
+      <p className="help">Wait this long after Start before the first new trade. Open positions stay visible and can still be closed.</p>
+      <div className="row">
+        {[180, 300, 600].map((n) => (
+          <button key={n} className={`btn ${Number(delay) === n ? "primary" : "ghost"}`} onClick={() => persist({ startup_delay_seconds: n }, `Startup delay ${n / 60} min`)}>{n / 60} min</button>
+        ))}
+        <input type="number" min="0" value={delay} onChange={(e) => setDelay(e.target.value)} onBlur={() => persist({ startup_delay_seconds: Number(delay) }, `Startup delay ${delay}s`)} />
+      </div>
+      <label>Trade gap after close</label>
+      <p className="help">After a position closes, wait this long before opening a new one. Does not freeze or close an already open trade.</p>
+      <div className="row">
+        {[180, 300, 600].map((n) => (
+          <button key={n} className={`btn ${Number(gap) === n ? "primary" : "ghost"}`} onClick={() => persist({ trade_gap_seconds: n }, `Trade gap ${n / 60} min`)}>{n / 60} min</button>
+        ))}
+        <input type="number" min="0" value={gap} onChange={(e) => setGap(e.target.value)} onBlur={() => persist({ trade_gap_seconds: Number(gap) }, `Trade gap ${gap}s`)} />
+      </div>
+      <label>Take-profit count (1-5)</label>
+      <p className="help">How many take-profit levels the next signal should carry. Partial TPs keep the remaining position open.</p>
+      <div className="row">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            className={`btn ${Number(tpCount) === n ? "primary" : "ghost"}`}
+            onClick={() => persist({ tp_count: n, tp_percents: percentsForCount(n, tpPercents) }, `Take-profit count ${n}`)}
+          >{n}</button>
+        ))}
+      </div>
+      <label>TP percents</label>
+      <p className="help">Percent distance from entry for each TP, comma-separated. Example: 0.8,1.6 for two levels.</p>
+      <input value={tpPercents} onChange={(e) => setTpPercents(e.target.value)} onBlur={() => persist({ tp_percents: tpPercents }, "TP percents saved")} placeholder="0.8,1.6" />
+      <label>Stop-loss percent</label>
+      <p className="help">Percent distance from entry for the stop-loss on the next signal.</p>
+      <div className="row">
+        {[0.3, 0.5, 0.8, 1, 1.5].map((n) => (
+          <button key={n} className={`btn ${Number(sl) === n ? "primary" : "ghost"}`} onClick={() => persist({ sl_percent: n }, `Stop-loss ${n}%`)}>{n}%</button>
+        ))}
+        <input type="number" min="0" step="0.1" value={sl} onChange={(e) => setSl(e.target.value)} onBlur={() => persist({ sl_percent: Number(sl) }, `Stop-loss ${sl}%`)} />
+      </div>
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn primary" onClick={() => persist({ refresh_universe: true }, "Runtime settings saved. Restart the bot to apply.")}>Save runtime settings</button>
+        <button className="btn danger" onClick={async () => {
+          if (!window.confirm("Reset all signals, positions, trades, events, and logs for this bot?")) return;
+          try {
+            await api(`/api/bots/${bot.id}/reset-data`, { method: "POST", body: "{}" });
+            setNotice("Trading data reset.");
+            onRefresh();
+          } catch (e) {
+            setError(e.message);
+          }
+        }}>Reset all data</button>
+      </div>
+      <p className="muted">Delay and trade gap never close or block management of an already open position. Reset does not delete strategy files or secrets.</p>
+    </div>
+  );
+}
+
+function StrategyPanel({ bot, files, onRefresh, setError, setNotice }) {
+  const [path, setPath] = useState(files.find((f) => f.path === "strategy.py")?.path || files[0]?.path || "");
+  const [content, setContent] = useState("");
+  const [activate, setActivate] = useState(false);
+  const [backups, setBackups] = useState([]);
+  const [backup, setBackup] = useState("");
+  const [uploadName, setUploadName] = useState("strategy.py");
+
+  useEffect(() => {
+    const next = files.find((f) => f.path === path) ? path : (files.find((f) => f.path === "strategy.py")?.path || files[0]?.path || "");
+    setPath(next);
+  }, [bot.id, files]);
+
+  useEffect(() => {
+    if (!path) {
+      setContent("");
+      return;
+    }
+    api(`/api/bots/${bot.id}/strategy/file?path=${encodeURIComponent(path)}`)
+      .then((r) => setContent(r.content || ""))
+      .catch((e) => setError(e.message));
+  }, [bot.id, path]);
+
+  async function loadBackups() {
+    try {
+      const rows = await api(`/api/bots/${bot.id}/strategy/backups`);
+      setBackups(rows || []);
+      setBackup((rows && rows[0]?.backup) || "");
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => {
+    loadBackups();
+  }, [bot.id, files]);
+
+  async function uploadFile(file) {
+    if (!file) return;
+    const dest = uploadName || file.name || "strategy.py";
+    const body = new FormData();
+    body.append("file", file);
+    body.append("path", dest);
+    body.append("activate", activate ? "true" : "false");
+    try {
+      const res = await fetch(`/api/bots/${bot.id}/strategy/upload`, { method: "POST", body });
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail || res.statusText));
+      setPath(data.path || dest);
+      setContent(data.content || "");
+      setNotice(data.activated ? `Uploaded and activated ${data.path}` : `Uploaded ${data.path}. Activate the new version when ready.`);
+      onRefresh();
+      loadBackups();
+    } catch (e) { setError(e.message); }
+  }
+
+  return (
+    <div className="panel">
+      <h3>Strategy files</h3>
+      <p className="help">Edit, upload, or restore strategy files. Delete keeps a backup you can restore here. LIVE bots are never auto-activated while running.</p>
+      <label>File</label>
+      <select value={path} onChange={(e) => setPath(e.target.value)}>
+        {(files || []).length ? files.map((f) => <option key={f.path} value={f.path}>{f.path}</option>) : <option value="">No strategy file — upload one</option>}
+      </select>
+      <textarea rows={12} value={content} onChange={(e) => setContent(e.target.value)} className="code-edit" />
+      <label className="row">
+        <input type="checkbox" checked={activate} onChange={(e) => setActivate(e.target.checked)} />
+        Activate after save (blocked while LIVE is running)
+      </label>
+      <div className="row" style={{ marginTop: 8 }}>
+        <button className="btn primary" disabled={!path} onClick={async () => {
+          try {
+            const r = await api(`/api/bots/${bot.id}/strategy/file`, {
+              method: "POST",
+              body: JSON.stringify({ path: path || "strategy.py", content, activate }),
+            });
+            setNotice(r.activated ? `Saved and activated ${r.path}` : `Saved ${r.path}. Activate the new version when ready.`);
+            onRefresh();
+            loadBackups();
+          } catch (e) { setError(e.message); }
+        }}>Save</button>
+        <button className="btn ghost" disabled={!path} onClick={async () => {
+          try {
+            const r = await api(`/api/bots/${bot.id}/strategy/clean`, { method: "POST", body: JSON.stringify({ path }) });
+            setContent(r.content || "");
+            setNotice(`Cleaned ${path}. Backup ${r.backup || "created"}.`);
+            onRefresh();
+            loadBackups();
+          } catch (e) { setError(e.message); }
+        }}>Clean comments</button>
+        <button className="btn danger" disabled={!path} onClick={async () => {
+          try {
+            const r = await api(`/api/bots/${bot.id}/strategy/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+            setNotice(`Deleted ${path}. Backup ${r.backup || "created"}. Upload or restore to put it back.`);
+            setContent("");
+            onRefresh();
+            loadBackups();
+          } catch (e) { setError(e.message); }
+        }}>Delete</button>
+      </div>
+      <label>Upload strategy file</label>
+      <div className="row">
+        <input value={uploadName} onChange={(e) => setUploadName(e.target.value)} placeholder="strategy.py" />
+        <input type="file" onChange={(e) => uploadFile(e.target.files?.[0])} />
+      </div>
+      <label>Restore backup</label>
+      <div className="row">
+        <select value={backup} onChange={(e) => setBackup(e.target.value)}>
+          {(backups || []).length ? backups.map((b) => <option key={b.backup} value={b.backup}>{b.path} · {b.stamp}</option>) : <option value="">No backups</option>}
+        </select>
+        <button className="btn ghost" disabled={!backup} onClick={async () => {
+          try {
+            const r = await api(`/api/bots/${bot.id}/strategy/restore`, {
+              method: "POST",
+              body: JSON.stringify({ backup, activate }),
+            });
+            setPath(r.path || path);
+            setContent(r.content || "");
+            setNotice(`Restored ${r.path} from backup.`);
+            onRefresh();
+            loadBackups();
+          } catch (e) { setError(e.message); }
+        }}>Restore</button>
+      </div>
+      <p className="muted">Saves create a local backup. LIVE bots are never auto-activated while running.</p>
     </div>
   );
 }

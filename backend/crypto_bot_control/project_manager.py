@@ -112,13 +112,47 @@ def create_venv(venv_path: Path) -> str:
     py = venv_python(venv_path)
     if Path(py).exists():
         return py
-    try:
-        builder = venv.EnvBuilder(with_pip=False, clear=False)
-        builder.create(str(venv_path))
-    except BaseException:
-        return sys.executable
+    for with_pip in (True, False):
+        try:
+            builder = venv.EnvBuilder(with_pip=with_pip, clear=False)
+            builder.create(str(venv_path))
+            break
+        except BaseException:
+            continue
     py = venv_python(venv_path)
     return py if Path(py).exists() else sys.executable
+
+
+def _pip_python(venv_python_path: str) -> str | None:
+    for candidate in (venv_python_path, sys.executable):
+        if not candidate:
+            continue
+        try:
+            proc = subprocess.run(
+                [candidate, "-m", "pip", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception:
+            continue
+        if proc.returncode == 0:
+            return candidate
+    return None
+
+
+def _requirement_packages(path: Path) -> list[str]:
+    packages = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return packages
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        packages.append(line)
+    return packages
 
 
 def venv_python(venv_path: Path) -> str:
@@ -131,20 +165,34 @@ def venv_python(venv_path: Path) -> str:
 
 def install_dependencies(venv_python_path: str, project_root: Path) -> dict:
     logs = []
-    ok = True
-    cmds = []
     pyproject = project_root / "pyproject.toml"
     requirements = project_root / "requirements.txt"
     if pyproject.is_file():
-        cmds.append([venv_python_path, "-m", "pip", "install", "--upgrade", "pip"])
-        cmds.append([venv_python_path, "-m", "pip", "install", str(project_root)])
+        cmds = [["-m", "pip", "install", "--upgrade", "pip"], ["-m", "pip", "install", str(project_root)]]
     elif requirements.is_file():
-        cmds.append([venv_python_path, "-m", "pip", "install", "--upgrade", "pip"])
-        cmds.append([venv_python_path, "-m", "pip", "install", "-r", str(requirements)])
+        packages = _requirement_packages(requirements)
+        if not packages:
+            return {
+                "ok": True,
+                "logs": ["requirements.txt has no packages; skipped pip install."],
+                "error": "",
+            }
+        cmds = [["-m", "pip", "install", "--upgrade", "pip"], ["-m", "pip", "install", "-r", str(requirements)]]
     else:
         return {"ok": True, "logs": ["No dependency manifest detected; skipped install."], "error": ""}
 
-    for cmd in cmds:
+    pip_py = _pip_python(venv_python_path)
+    if not pip_py:
+        return {
+            "ok": False,
+            "logs": logs,
+            "error": "pip is not available in the bot venv or system Python. Install pip, or remove unused packages from requirements.txt.",
+        }
+    if pip_py != venv_python_path:
+        logs.append(f"venv pip missing; using {pip_py} -m pip")
+
+    for extra in cmds:
+        cmd = [pip_py, *extra]
         try:
             proc = subprocess.run(
                 cmd,
@@ -155,7 +203,6 @@ def install_dependencies(venv_python_path: str, project_root: Path) -> dict:
             )
             logs.append((proc.stdout or "") + (proc.stderr or ""))
             if proc.returncode != 0:
-                ok = False
                 return {
                     "ok": False,
                     "logs": logs,
@@ -163,7 +210,7 @@ def install_dependencies(venv_python_path: str, project_root: Path) -> dict:
                 }
         except Exception as exc:
             return {"ok": False, "logs": logs, "error": str(exc)}
-    return {"ok": ok, "logs": logs, "error": ""}
+    return {"ok": True, "logs": logs, "error": ""}
 
 
 def snapshot_version(current: Path, versions_dir: Path, label: str) -> Path:

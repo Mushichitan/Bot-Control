@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -87,6 +88,48 @@ class RollbackBody(BaseModel):
     version_id: int | None = None
 
 
+class StrategyFileBody(BaseModel):
+    path: str
+    content: str = ""
+    activate: bool = False
+
+
+class RuntimeSettingsBody(BaseModel):
+    scan_mode: str | None = None
+    symbols: list[str] | str | None = None
+    startup_delay_seconds: int | None = None
+    trade_gap_seconds: int | None = None
+    tp_count: int | None = None
+    tp_percents: list[float] | str | None = None
+    sl_percent: float | None = None
+    max_open_positions: int | None = None
+    refresh_universe: bool | None = None
+
+
+class ClosePositionBody(BaseModel):
+    reason: str = "MANUAL"
+
+
+class StrategyRestoreBody(BaseModel):
+    backup: str
+    path: str | None = None
+    activate: bool = False
+
+
+@contextmanager
+def api_db(*, write: bool = False):
+    session = get_session()
+    try:
+        yield session
+        if write:
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _ok_or_err(fn):
     try:
         return fn()
@@ -94,6 +137,11 @@ def _ok_or_err(fn):
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _write(fn):
+    with api_db(write=True) as session:
+        return _ok_or_err(lambda: fn(session))
 
 
 @app.get("/api/health")
@@ -126,11 +174,7 @@ def api_list_bots():
 
 @app.post("/api/bots")
 def api_import_bot(body: ImportBody):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.import_bot(session, body.name, body.source_path, body.entry_point))
-    finally:
-        session.close()
+    return _write(lambda session: services.import_bot(session, body.name, body.source_path, body.entry_point))
 
 
 @app.get("/api/bots/{bot_id}")
@@ -147,20 +191,12 @@ def api_get_bot(bot_id: int):
 
 @app.patch("/api/bots/{bot_id}")
 def api_update_bot(bot_id: int, body: BotUpdateBody):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.update_bot(session, bot_id, **body.model_dump()))
-    finally:
-        session.close()
+    return _write(lambda session: services.update_bot(session, bot_id, **body.model_dump()))
 
 
 @app.post("/api/bots/{bot_id}/dependencies")
 def api_install_deps(bot_id: int):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.install_bot_deps(session, bot_id))
-    finally:
-        session.close()
+    return _write(lambda session: services.install_bot_deps(session, bot_id))
 
 
 @app.get("/api/bots/{bot_id}/validate")
@@ -183,76 +219,44 @@ def api_list_env(bot_id: int):
 
 @app.post("/api/bots/{bot_id}/env")
 def api_set_env(bot_id: int, body: EnvBody):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.set_env_var(session, bot_id, body.key, body.value, body.is_secret, body.is_required))
-    finally:
-        session.close()
+    return _write(lambda session: services.set_env_var(session, bot_id, body.key, body.value, body.is_secret, body.is_required))
 
 
 @app.delete("/api/bots/{bot_id}/env/{key}")
 def api_del_env(bot_id: int, key: str):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.delete_env_var(session, bot_id, key))
-    finally:
-        session.close()
+    return _write(lambda session: services.delete_env_var(session, bot_id, key))
 
 
 @app.post("/api/bots/{bot_id}/env/import")
 def api_import_env(bot_id: int, body: EnvImportBody):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.import_env_file(session, bot_id, body.content))
-    finally:
-        session.close()
+    return _write(lambda session: services.import_env_file(session, bot_id, body.content))
 
 
 @app.post("/api/bots/{bot_id}/start")
 def api_start(bot_id: int, body: StartBody | None = None):
-    session = db()
-    try:
-        confirmed = body.live_confirmed if body else False
-        return _ok_or_err(lambda: services.start_bot(session, bot_id, live_confirmed=confirmed))
-    finally:
-        session.close()
+    confirmed = body.live_confirmed if body else False
+    return _write(lambda session: services.start_bot(session, bot_id, live_confirmed=confirmed))
 
 
 @app.post("/api/bots/{bot_id}/stop")
 def api_stop(bot_id: int):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.stop_bot(session, bot_id))
-    finally:
-        session.close()
+    return _write(lambda session: services.stop_bot(session, bot_id))
 
 
 @app.post("/api/bots/{bot_id}/restart")
 def api_restart(bot_id: int, body: StartBody | None = None):
-    session = db()
-    try:
-        confirmed = body.live_confirmed if body else False
-        return _ok_or_err(lambda: services.restart_bot(session, bot_id, live_confirmed=confirmed))
-    finally:
-        session.close()
+    confirmed = body.live_confirmed if body else False
+    return _write(lambda session: services.restart_bot(session, bot_id, live_confirmed=confirmed))
 
 
 @app.post("/api/bots/{bot_id}/pause")
 def api_pause(bot_id: int):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.pause_bot(session, bot_id))
-    finally:
-        session.close()
+    return _write(lambda session: services.pause_bot(session, bot_id))
 
 
 @app.post("/api/bots/{bot_id}/resume")
 def api_resume(bot_id: int):
-    session = db()
-    try:
-        return _ok_or_err(lambda: services.resume_bot(session, bot_id))
-    finally:
-        session.close()
+    return _write(lambda session: services.resume_bot(session, bot_id))
 
 
 @app.get("/api/bots/{bot_id}/events")
@@ -280,16 +284,13 @@ def api_events(bot_id: int, category: str | None = None, limit: int = 200):
 
 @app.post("/api/bots/{bot_id}/events")
 def api_push_event(bot_id: int, body: EventBody):
-    session = db()
-    try:
+    def _run(session):
         payload = dict(body.payload)
         payload["type"] = body.type
         event = services.ingest_event(session, bot_id, payload, source="adapter")
         return {"id": event.id, "type": event.event_type}
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    finally:
-        session.close()
+
+    return _write(_run)
 
 
 @app.get("/api/bots/{bot_id}/signals")
@@ -312,6 +313,7 @@ def api_signals(bot_id: int, limit: int = 200):
                 "side": r.side,
                 "entry": r.entry,
                 "tp": r.tp,
+                "tps": services._parse_tps_json(r.tps_json),
                 "sl": r.sl,
                 "confidence": r.confidence,
                 "strategy": r.strategy,
@@ -354,6 +356,7 @@ def api_positions(bot_id: int, status: str | None = None):
                     "exit": r.exit_price,
                     "quantity": r.quantity,
                     "tp": r.tp,
+                    "tps": services._parse_tps_json(r.tps_json),
                     "sl": r.sl,
                     "unrealized_pnl": r.unrealized_pnl,
                     "realized_pnl": r.realized_pnl,
@@ -370,6 +373,17 @@ def api_positions(bot_id: int, status: str | None = None):
         return out
     finally:
         session.close()
+
+
+@app.post("/api/bots/{bot_id}/reset-data")
+def api_reset_data(bot_id: int):
+    return _write(lambda session: services.reset_bot_data(session, bot_id))
+
+
+@app.post("/api/bots/{bot_id}/positions/{position_id}/close")
+def api_close_position(bot_id: int, position_id: int, body: ClosePositionBody | None = None):
+    reason = body.reason if body else "MANUAL"
+    return _write(lambda session: services.close_position(session, bot_id, position_id, reason))
 
 
 @app.get("/api/bots/{bot_id}/reports")
@@ -472,22 +486,14 @@ def api_changes(bot_id: int):
 
 @app.post("/api/bots/{bot_id}/versions/activate")
 def api_activate(bot_id: int, body: ActivateBody | None = None):
-    session = db()
-    try:
-        note = body.note if body else ""
-        return _ok_or_err(lambda: services.activate_version(session, bot_id, note))
-    finally:
-        session.close()
+    note = body.note if body else ""
+    return _write(lambda session: services.activate_version(session, bot_id, note))
 
 
 @app.post("/api/bots/{bot_id}/versions/rollback")
 def api_rollback(bot_id: int, body: RollbackBody | None = None):
-    session = db()
-    try:
-        vid = body.version_id if body else None
-        return _ok_or_err(lambda: services.rollback_version(session, bot_id, vid))
-    finally:
-        session.close()
+    vid = body.version_id if body else None
+    return _write(lambda session: services.rollback_version(session, bot_id, vid))
 
 
 @app.get("/api/bots/{bot_id}/telegram/commands")
@@ -499,13 +505,88 @@ def api_tg_commands(bot_id: int):
         session.close()
 
 
-@app.post("/api/bots/{bot_id}/backup")
-def api_backup(bot_id: int, include_secrets: bool = False):
+@app.get("/api/bots/{bot_id}/strategy/files")
+def api_strategy_files(bot_id: int):
     session = db()
     try:
-        return _ok_or_err(lambda: services.export_backup(session, bot_id, include_secrets=include_secrets))
+        return _ok_or_err(lambda: services.list_strategy_files(session, bot_id))
     finally:
         session.close()
+
+
+@app.get("/api/bots/{bot_id}/strategy/file")
+def api_read_strategy(bot_id: int, path: str = Query(...)):
+    session = db()
+    try:
+        return _ok_or_err(lambda: services.read_strategy_file(session, bot_id, path))
+    finally:
+        session.close()
+
+
+@app.post("/api/bots/{bot_id}/strategy/file")
+def api_save_strategy(bot_id: int, body: StrategyFileBody):
+    return _write(lambda session: services.save_strategy_file(session, bot_id, body.path, body.content, body.activate))
+
+
+@app.delete("/api/bots/{bot_id}/strategy/file")
+def api_delete_strategy(bot_id: int, path: str = Query(...)):
+    return _write(lambda session: services.delete_strategy_file(session, bot_id, path))
+
+
+@app.post("/api/bots/{bot_id}/strategy/clean")
+def api_clean_strategy(bot_id: int, body: StrategyFileBody):
+    return _write(lambda session: services.clean_strategy_file(session, bot_id, body.path))
+
+
+@app.get("/api/bots/{bot_id}/strategy/backups")
+def api_strategy_backups(bot_id: int):
+    session = db()
+    try:
+        return _ok_or_err(lambda: services.list_strategy_backups(session, bot_id))
+    finally:
+        session.close()
+
+
+@app.post("/api/bots/{bot_id}/strategy/restore")
+def api_restore_strategy(bot_id: int, body: StrategyRestoreBody):
+    return _write(
+        lambda session: services.restore_strategy_backup(session, bot_id, body.backup, body.path, body.activate)
+    )
+
+
+@app.post("/api/bots/{bot_id}/strategy/upload")
+async def api_upload_strategy(
+    bot_id: int,
+    file: UploadFile = File(...),
+    path: str | None = Form(None),
+    activate: bool = Form(False),
+):
+    raw = await file.read()
+    dest = path or file.filename or "strategy.py"
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Strategy file must be UTF-8 text") from exc
+    return _write(lambda session: services.save_strategy_file(session, bot_id, dest, content, activate))
+
+
+@app.get("/api/bots/{bot_id}/runtime-settings")
+def api_get_runtime(bot_id: int):
+    session = db()
+    try:
+        return _ok_or_err(lambda: services.get_runtime_settings(session, bot_id))
+    finally:
+        session.close()
+
+
+@app.post("/api/bots/{bot_id}/runtime-settings")
+def api_set_runtime(bot_id: int, body: RuntimeSettingsBody):
+    return _write(lambda session: services.update_runtime_settings(session, bot_id, body.model_dump()))
+
+
+@app.post("/api/bots/{bot_id}/backup")
+def api_backup(bot_id: int, include_secrets: bool = False):
+    return _write(lambda session: services.export_backup(session, bot_id, include_secrets=include_secrets))
 
 
 def mount_frontend(static_dir: Path) -> None:

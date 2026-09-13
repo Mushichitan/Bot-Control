@@ -29,6 +29,7 @@ from .database import (
     Event,
     LogLine,
     Position,
+    Report,
     Signal,
     Trade,
     session_scope,
@@ -36,7 +37,7 @@ from .database import (
 )
 from .events import CATEGORY_MAP, format_activity_message, parse_line
 from .process_controller import BotProcess, ProcessRegistry, process_alive
-from .project_analyzer import analyze_project
+from .project_analyzer import SKIP_DIRS, analyze_project
 from .project_manager import (
     allocate_slug,
     bot_dirs,
@@ -52,6 +53,12 @@ from .project_manager import (
     venv_python,
 )
 from .security import SecretVault, is_safe_relative_path, is_secret_name, mask_secret, redact_text
+from .universe import (
+    fetch_binance_futures_universe,
+    hardcoded_tradfi_symbols,
+    normalize_scan_mode,
+    symbols_for_mode,
+)
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -335,11 +342,27 @@ def validate_bot(session: Session, bot_id: int) -> dict:
         issues.append("No entry point configured")
     elif not (Path(bot.managed_path) / bot.entry_point).exists():
         issues.append(f"Entry point not found: {bot.entry_point}")
+    else:
+        entry_path = Path(bot.managed_path) / bot.entry_point
+        try:
+            src = entry_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            src = ""
+        if ("from strategy import" in src or "import strategy" in src) and not (Path(bot.managed_path) / "strategy.py").is_file():
+            issues.append("strategy.py is missing. Upload or restore it in Settings before Start.")
     rows = session.query(EnvVar).filter(EnvVar.bot_id == bot.id).all()
     missing = [r.key for r in rows if r.is_required and not r.encrypted_value]
     if missing:
         issues.append("Missing required environment variables: " + ", ".join(missing))
-    if bot.deps_status == "ERROR":
+    req = Path(bot.managed_path) / "requirements.txt"
+    empty_reqs = req.is_file() and not any(
+        line.strip() and not line.strip().startswith("#")
+        for line in req.read_text(encoding="utf-8", errors="replace").splitlines()
+    )
+    if empty_reqs and bot.deps_status == "ERROR":
+        bot.deps_status = "READY"
+        bot.last_error = ""
+    elif bot.deps_status == "ERROR":
         issues.append("Dependencies are not installed")
     analysis = json.loads(bot.analysis_json or "{}")
     if analysis.get("plaintext_env_present"):
@@ -404,6 +427,21 @@ def _on_line(bot_id: int, stream: str, line: str) -> None:
             ingest_event(session, bot_id, parsed, source="stdout")
 
 
+def _recent_stderr(session: Session, bot_id: int) -> str:
+    rows = (
+        session.query(LogLine)
+        .filter(LogLine.bot_id == bot_id, LogLine.stream == "stderr")
+        .order_by(LogLine.id.desc())
+        .limit(30)
+        .all()
+    )
+    lines = [r.line.strip() for r in reversed(rows) if r.line and r.line.strip()]
+    for line in reversed(lines):
+        if "Error" in line or "Exception" in line:
+            return line
+    return " | ".join(lines[-3:]) if lines else ""
+
+
 def _on_exit(bot_id: int, code: int | None) -> None:
     with session_scope() as session:
         bot = session.get(Bot, bot_id)
@@ -422,16 +460,20 @@ def _on_exit(bot_id: int, code: int | None) -> None:
             bot.last_error = ""
             ingest_event(session, bot_id, {"type": "BOT_STOPPED", "message": "Bot process ended"}, source="controller")
             return
+        detail = _recent_stderr(session, bot_id)
+        reason = f"process exited with code {code}"
+        if detail:
+            reason = f"{reason}: {detail}"
         bot.status = "CRASHED"
-        bot.last_error = f"process exited with code {code}"
+        bot.last_error = reason
         ingest_event(
             session,
             bot_id,
-            {"type": "BOT_ERROR", "message": f"BOT CRASHED Reason: process exited with code {code}"},
+            {"type": "BOT_ERROR", "message": f"BOT CRASHED Reason: {reason}"},
             source="controller",
         )
         _audit(session, "BOT_CRASH", bot_id, f"exit={code}")
-        if bot.auto_restart:
+        if bot.auto_restart and "No module named" not in (detail or ""):
             _maybe_autorestart(bot_id)
 
 
@@ -482,6 +524,9 @@ def start_bot(session: Session, bot_id: int, live_confirmed: bool = False, from_
     env["CBC_BOT_ID"] = str(bot.id)
     env["CBC_TRADING_MODE"] = bot.trading_mode
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONPATH"] = str(Path(bot.managed_path)) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
     secrets = secret_values_for(session, bot.id)
     proc = BotProcess(
         bot_id=bot.id,
@@ -498,8 +543,10 @@ def start_bot(session: Session, bot_id: int, live_confirmed: bool = False, from_
     registry.register(proc)
     time.sleep(0.45)
     if not proc.is_running():
+        time.sleep(0.2)
+        detail = _recent_stderr(session, bot.id)
         bot.status = "ERROR"
-        bot.last_error = "Process exited immediately after start"
+        bot.last_error = detail or "Process exited immediately after start"
         registry.unregister(bot.id)
         raise ValueError(bot.last_error)
     bot.pid = pid
@@ -586,6 +633,7 @@ def ingest_event(session: Session, bot_id: int, payload: dict, source: str = "bo
 def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
     t = str(payload.get("type") or "").upper()
     if t == "SIGNAL_GENERATED":
+        tps = _extract_tps(payload)
         session.add(
             Signal(
                 bot_id=bot_id,
@@ -593,7 +641,7 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
                 symbol=str(payload.get("symbol") or ""),
                 side=str(payload.get("side") or "").upper(),
                 entry=_num(payload.get("entry")),
-                tp=_num(payload.get("tp")),
+                tp=_num(payload.get("tp")) if _num(payload.get("tp")) is not None else (tps[-1] if tps else None),
                 sl=_num(payload.get("sl")),
                 confidence=_num(payload.get("confidence")),
                 strategy=str(payload.get("strategy") or ""),
@@ -601,6 +649,7 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
                 execution_status=str(payload.get("execution_status") or "GENERATED"),
                 telegram_status=str(payload.get("telegram_status") or "UNKNOWN"),
                 binance_status=str(payload.get("binance_status") or "UNKNOWN"),
+                tps_json=json.dumps(tps),
             )
         )
         return
@@ -612,6 +661,7 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
             .first()
         )
         number = (last.display_number + 1) if last else 1
+        tps = _extract_tps(payload)
         session.add(
             Position(
                 bot_id=bot_id,
@@ -622,8 +672,9 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
                 entry_price=_num(payload.get("entry") or payload.get("entry_price")),
                 current_price=_num(payload.get("current_price") or payload.get("entry") or payload.get("entry_price")),
                 quantity=_num(payload.get("quantity")),
-                tp=_num(payload.get("tp")),
+                tp=_num(payload.get("tp")) if _num(payload.get("tp")) is not None else (tps[-1] if tps else None),
                 sl=_num(payload.get("sl")),
+                tps_json=json.dumps(tps),
                 unrealized_pnl=_num(payload.get("unrealized_pnl")) or 0.0,
                 pnl_pct=_num(payload.get("pnl_pct")),
                 strategy=str(payload.get("strategy") or ""),
@@ -643,8 +694,27 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
             pos.pnl_pct = _num(payload.get("pnl_pct"))
         if payload.get("quantity") is not None:
             pos.quantity = _num(payload.get("quantity"))
+        extra_tps = _extract_tps(payload)
+        if extra_tps:
+            pos.tps_json = json.dumps(extra_tps)
+            pos.tp = extra_tps[-1]
         return
     if t in {"TP_HIT", "SL_HIT", "POSITION_CLOSED"} and pos:
+        remaining = _num(payload.get("remaining_quantity") or payload.get("quantity_remaining"))
+        partial = bool(payload.get("partial")) or (t == "TP_HIT" and remaining is not None and remaining > 0)
+        if payload.get("current_price") is not None:
+            pos.current_price = _num(payload.get("current_price"))
+        if payload.get("quantity") is not None and partial:
+            pos.quantity = _num(payload.get("quantity"))
+        if remaining is not None:
+            pos.quantity = remaining
+        if partial and t == "TP_HIT":
+            if payload.get("unrealized_pnl") is not None:
+                pos.unrealized_pnl = _num(payload.get("unrealized_pnl"))
+            extra_tps = _extract_tps(payload)
+            if extra_tps:
+                pos.tps_json = json.dumps(extra_tps)
+            return
         reason = "TP" if t == "TP_HIT" else "SL" if t == "SL_HIT" else str(payload.get("close_reason") or "MANUAL")
         pos.status = "CLOSED"
         pos.close_reason = reason
@@ -669,7 +739,80 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
         )
 
 
+def close_position(session: Session, bot_id: int, position_id: int, reason: str = "MANUAL") -> dict:
+    bot = _bot_or_404(session, bot_id)
+    pos = session.get(Position, position_id)
+    if not pos or pos.bot_id != bot.id:
+        pos = (
+            session.query(Position)
+            .filter(Position.bot_id == bot.id, Position.display_number == position_id, Position.status == "OPEN")
+            .first()
+        )
+    if not pos or pos.bot_id != bot.id:
+        raise ValueError("Position not found")
+    if pos.status != "OPEN":
+        raise ValueError("Position is not open")
+    exit_price = pos.current_price if pos.current_price is not None else pos.entry_price
+    pnl = pos.unrealized_pnl if pos.unrealized_pnl is not None else 0.0
+    ingest_event(
+        session,
+        bot.id,
+        {
+            "type": "POSITION_CLOSED",
+            "internal_id": pos.id,
+            "position_id": pos.external_id or str(pos.display_number),
+            "id": pos.external_id or str(pos.id),
+            "symbol": pos.symbol,
+            "side": pos.side,
+            "exit": exit_price,
+            "exit_price": exit_price,
+            "realized_pnl": pnl,
+            "close_reason": reason or "MANUAL",
+            "partial": False,
+        },
+        source="controller",
+    )
+    _write_bot_command(
+        bot,
+        {
+            "action": "CLOSE_POSITION",
+            "position_id": pos.external_id or str(pos.display_number),
+            "display_number": pos.display_number,
+            "symbol": pos.symbol,
+            "reason": reason or "MANUAL",
+        },
+    )
+    _audit(session, "POSITION_CLOSED_MANUAL", bot.id, f"{pos.symbol} #{pos.display_number}")
+    session.refresh(pos)
+    return {
+        "ok": True,
+        "id": pos.id,
+        "status": pos.status,
+        "close_reason": pos.close_reason,
+        "exit": pos.exit_price,
+        "realized_pnl": pos.realized_pnl,
+    }
+
+
+def _write_bot_command(bot: Bot, command: dict) -> None:
+    dest = Path(bot.managed_path) / ".cbc"
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / "commands.jsonl"
+    payload = dict(command)
+    payload["ts"] = utcnow().isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
 def _find_position(session: Session, bot_id: int, payload: dict) -> Position | None:
+    internal = payload.get("internal_id") or payload.get("db_id")
+    if internal not in (None, ""):
+        try:
+            found = session.get(Position, int(internal))
+        except (TypeError, ValueError):
+            found = None
+        if found and found.bot_id == bot_id and found.status == "OPEN":
+            return found
     ext = str(payload.get("position_id") or payload.get("id") or "")
     if ext:
         pos = (
@@ -702,6 +845,57 @@ def _health_status(val: Any) -> str:
     if text in {"ERROR", "INVALID", "DISCONNECTED", "FAILED"}:
         return "DISCONNECTED" if text in {"ERROR", "FAILED", "DISCONNECTED"} else text
     return "UNKNOWN"
+
+
+def _parse_tps_json(raw: str | None) -> list[float]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    out: list[float] = []
+    if isinstance(data, list):
+        for item in data:
+            n = _num(item)
+            if n is not None:
+                out.append(n)
+    return out[:5]
+
+
+def _extract_tps(payload: dict) -> list[float]:
+    raw = payload.get("tps")
+    if raw is None:
+        raw = payload.get("take_profits")
+    out: list[float] = []
+    if isinstance(raw, list):
+        for item in raw:
+            n = _num(item)
+            if n is not None:
+                out.append(n)
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    n = _num(item)
+                    if n is not None:
+                        out.append(n)
+        except json.JSONDecodeError:
+            for part in raw.replace(";", ",").split(","):
+                n = _num(part.strip())
+                if n is not None:
+                    out.append(n)
+    if not out:
+        for key in ("tp1", "tp2", "tp3", "tp4", "tp5"):
+            n = _num(payload.get(key))
+            if n is not None:
+                out.append(n)
+    if not out:
+        n = _num(payload.get("tp"))
+        if n is not None:
+            out.append(n)
+    return out[:5]
 
 
 def _num(val: Any) -> float | None:
@@ -901,17 +1095,426 @@ def telegram_commands(session: Session, bot_id: int) -> list[str]:
     return analysis.get("capabilities", {}).get("telegram_commands") or []
 
 
+def _managed_file(bot: Bot, rel: str) -> Path:
+    if not is_safe_relative_path(rel):
+        raise ValueError("Invalid file path")
+    root = Path(bot.managed_path).resolve()
+    path = (root / rel).resolve()
+    if root not in path.parents and path != root:
+        raise ValueError("Invalid file path")
+    if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
+        raise ValueError("That path is not editable")
+    return path
+
+
+def list_strategy_files(session: Session, bot_id: int) -> list[dict]:
+    bot = _bot_or_404(session, bot_id)
+    root = Path(bot.managed_path)
+    files = []
+    for rel, digest in sorted(list_relative_files(root).items()):
+        suffix = Path(rel).suffix.lower()
+        if suffix not in STRATEGY_EDITABLE_SUFFIXES:
+            continue
+        path = root / rel
+        files.append(
+            {
+                "path": rel,
+                "size": path.stat().st_size if path.exists() else 0,
+                "fingerprint": digest,
+            }
+        )
+    return files
+
+
+def read_strategy_file(session: Session, bot_id: int, rel: str) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    path = _managed_file(bot, rel)
+    if not path.is_file():
+        raise ValueError("File not found")
+    if path.stat().st_size > STRATEGY_MAX_BYTES:
+        raise ValueError("File is too large to edit in the app")
+    return {"path": rel, "content": path.read_text(encoding="utf-8", errors="replace")}
+
+
+def _backup_strategy_file(bot: Bot, rel: str, path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    stamp = utcnow().strftime("%Y%m%d%H%M%S")
+    dest_dir = Path(bot.managed_path) / ".strategy_backups"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = rel.replace("/", "__").replace("\\", "__")
+    dest = dest_dir / f"{safe}.{stamp}.bak"
+    dest.write_bytes(path.read_bytes())
+    return str(dest.relative_to(bot.managed_path)).replace("\\", "/")
+
+
+def save_strategy_file(session: Session, bot_id: int, rel: str, content: str, activate: bool = False) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    if bot.trading_mode == "LIVE" and registry.is_running(bot.id) and activate:
+        raise PermissionError("Cannot silently activate changed trading code while LIVE. Stop the bot first.")
+    path = _managed_file(bot, rel)
+    if path.suffix.lower() not in STRATEGY_EDITABLE_SUFFIXES:
+        raise ValueError("That file type is not editable")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = _backup_strategy_file(bot, rel, path) if path.exists() else None
+    path.write_text(content if content is not None else "", encoding="utf-8")
+    _audit(session, "STRATEGY_SAVED", bot.id, rel)
+    activated = None
+    if activate:
+        if bot.trading_mode == "LIVE" and registry.is_running(bot.id):
+            raise PermissionError("Cannot silently activate changed trading code while LIVE. Stop the bot first.")
+        activated = activate_version(session, bot.id, note=f"saved {rel}")
+    return {
+        "ok": True,
+        "path": rel,
+        "backup": backup,
+        "content": path.read_text(encoding="utf-8", errors="replace"),
+        "activated": bool(activated),
+        "live_blocked": bot.trading_mode == "LIVE" and registry.is_running(bot.id) and not activate,
+        "needs_activation": detect_changes(session, bot.id)["changed"],
+    }
+
+
+def delete_strategy_file(session: Session, bot_id: int, rel: str) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    path = _managed_file(bot, rel)
+    if not path.exists():
+        raise ValueError("File not found")
+    if path.suffix.lower() not in STRATEGY_EDITABLE_SUFFIXES:
+        raise ValueError("That file type is not editable")
+    backup = _backup_strategy_file(bot, rel, path)
+    path.unlink()
+    _audit(session, "STRATEGY_DELETED", bot.id, rel)
+    return {"ok": True, "path": rel, "backup": backup, "needs_activation": True}
+
+
+def list_strategy_backups(session: Session, bot_id: int, rel: str | None = None) -> list[dict]:
+    bot = _bot_or_404(session, bot_id)
+    root = Path(bot.managed_path)
+    dest_dir = root / ".strategy_backups"
+    if not dest_dir.is_dir():
+        return []
+    wanted = None
+    if rel:
+        wanted = rel.replace("/", "__").replace("\\", "__")
+    out = []
+    for path in sorted(dest_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not path.is_file() or not path.name.endswith(".bak"):
+            continue
+        stem = path.name[: -len(".bak")]
+        if "." not in stem:
+            continue
+        safe, stamp = stem.rsplit(".", 1)
+        original = safe.replace("__", "/")
+        if wanted and safe != wanted:
+            continue
+        out.append(
+            {
+                "backup": str(path.relative_to(root)).replace("\\", "/"),
+                "path": original,
+                "stamp": stamp,
+                "size": path.stat().st_size,
+            }
+        )
+    return out
+
+
+def restore_strategy_backup(
+    session: Session, bot_id: int, backup: str, rel: str | None = None, activate: bool = False
+) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    if bot.trading_mode == "LIVE" and registry.is_running(bot.id) and activate:
+        raise PermissionError("Cannot silently activate changed trading code while LIVE. Stop the bot first.")
+    root = Path(bot.managed_path).resolve()
+    src = (root / backup).resolve()
+    if root not in src.parents or ".strategy_backups" not in src.parts:
+        raise ValueError("Invalid backup path")
+    if not src.is_file():
+        raise ValueError("Backup not found")
+    target_rel = rel
+    if not target_rel:
+        name = src.name[: -len(".bak")] if src.name.endswith(".bak") else src.name
+        if "." in name:
+            target_rel = name.rsplit(".", 1)[0].replace("__", "/")
+        else:
+            target_rel = name.replace("__", "/")
+    dest = _managed_file(bot, target_rel)
+    if dest.suffix.lower() not in STRATEGY_EDITABLE_SUFFIXES:
+        raise ValueError("That file type is not editable")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        _backup_strategy_file(bot, target_rel, dest)
+    dest.write_bytes(src.read_bytes())
+    _audit(session, "STRATEGY_RESTORED", bot.id, f"{backup} -> {target_rel}")
+    activated = None
+    if activate:
+        activated = activate_version(session, bot.id, note=f"restored {target_rel}")
+    return {
+        "ok": True,
+        "path": target_rel,
+        "backup": backup,
+        "activated": bool(activated),
+        "content": dest.read_text(encoding="utf-8", errors="replace"),
+        "needs_activation": detect_changes(session, bot.id)["changed"],
+    }
+
+
+def clean_strategy_file(session: Session, bot_id: int, rel: str) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    path = _managed_file(bot, rel)
+    if not path.is_file():
+        raise ValueError("File not found")
+    original = path.read_text(encoding="utf-8", errors="replace")
+    backup = _backup_strategy_file(bot, rel, path)
+    lines = original.splitlines()
+    cleaned: list[str] = []
+    blank_run = 0
+    for line in lines:
+        stripped = line.rstrip()
+        if stripped.strip().startswith("#") and not stripped.strip().startswith("#!"):
+            continue
+        if stripped.strip() == "":
+            blank_run += 1
+            if blank_run > 1:
+                continue
+            cleaned.append("")
+            continue
+        blank_run = 0
+        cleaned.append(stripped)
+    text = "\n".join(cleaned).strip() + ("\n" if cleaned else "")
+    path.write_text(text, encoding="utf-8")
+    _audit(session, "STRATEGY_CLEANED", bot.id, rel)
+    return {"ok": True, "path": rel, "backup": backup, "content": text, "needs_activation": True}
+
+
+def _safe_int(val: Any, default: int) -> int:
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_runtime_settings(session: Session, bot_id: int) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    env = decrypted_env(session, bot_id)
+    scan_mode = normalize_scan_mode(env.get("SCAN_MODE") or "ALL")
+    symbols_raw = env.get("SYMBOLS") or env.get("SYMBOL") or ""
+    symbols = [s.strip().upper() for s in symbols_raw.replace(";", ",").split(",") if s.strip()]
+    delay = max(0, _safe_int(env.get("STARTUP_DELAY_SECONDS"), 180))
+    gap = max(0, _safe_int(env.get("TRADE_GAP_SECONDS"), 180))
+    tp_count = min(5, max(1, _safe_int(env.get("TP_COUNT"), 1)))
+    percents = []
+    for part in (env.get("TP_PERCENTS") or env.get("TP_PERCENT") or "0.8").replace(";", ",").split(","):
+        n = _num(part.strip())
+        if n is not None:
+            percents.append(n)
+    if not percents:
+        percents = [0.8]
+    while len(percents) < tp_count:
+        percents.append(round(percents[-1] + percents[0], 4))
+    percents = percents[:tp_count]
+    all_raw = env.get("ALL_SYMBOLS") or ""
+    all_symbols = [s.strip().upper() for s in all_raw.replace(";", ",").split(",") if s.strip()]
+    crypto_raw = env.get("CRYPTO_SYMBOLS") or ""
+    crypto_symbols = [s.strip().upper() for s in crypto_raw.replace(";", ",").split(",") if s.strip()]
+    tradfi_raw = env.get("TRADFI_SYMBOLS") or ""
+    tradfi_symbols = [s.strip().upper() for s in tradfi_raw.replace(";", ",").split(",") if s.strip()]
+    if not tradfi_symbols:
+        tradfi_symbols = hardcoded_tradfi_symbols()
+    if not all_symbols:
+        if scan_mode == "TRADFI":
+            all_symbols = list(tradfi_symbols)
+        elif scan_mode == "BINANCE":
+            all_symbols = list(crypto_symbols)
+        elif scan_mode == "ALL":
+            crypto_set = set(crypto_symbols)
+            all_symbols = crypto_symbols + [s for s in tradfi_symbols if s not in crypto_set]
+    return {
+        "scan_mode": scan_mode,
+        "symbols": symbols,
+        "symbol": env.get("SYMBOL") or (symbols[0] if symbols else ""),
+        "all_symbols": all_symbols[:40],
+        "all_symbol_count": len(all_symbols),
+        "crypto_symbols": crypto_symbols[:40],
+        "crypto_symbol_count": len(crypto_symbols),
+        "tradfi_symbols": tradfi_symbols[:40],
+        "tradfi_symbol_count": len(tradfi_symbols),
+        "universe_label": _universe_label(scan_mode),
+        "startup_delay_seconds": max(0, delay),
+        "trade_gap_seconds": max(0, gap),
+        "tp_count": tp_count,
+        "tp_percents": percents,
+        "sl_percent": _num(env.get("SL_PERCENT")) or 0.5,
+        "max_open_positions": min(20, max(1, _safe_int(env.get("MAX_OPEN_POSITIONS"), 3))),
+        "trading_mode": bot.trading_mode,
+        "presets": {
+            "delay": [180, 300, 600],
+            "gap": [180, 300, 600],
+            "tp_count": [1, 2, 3, 4, 5],
+            "scan_mode": ["ALL", "BINANCE", "TRADFI"],
+            "max_open_positions": [1, 2, 3, 5, 10],
+        },
+    }
+
+
+def update_runtime_settings(session: Session, bot_id: int, payload: dict) -> dict:
+    current = get_runtime_settings(session, bot_id)
+    scan_mode = normalize_scan_mode(payload.get("scan_mode") or current["scan_mode"] or "ALL")
+    if scan_mode not in {"ALL", "BINANCE", "TRADFI"}:
+        raise ValueError("scan_mode must be ALL, BINANCE, or TRADFI")
+    symbols = payload.get("symbols")
+    if symbols is None:
+        symbols = current["symbols"]
+    if isinstance(symbols, str):
+        symbols = [s.strip().upper() for s in symbols.replace(";", ",").split(",") if s.strip()]
+    elif isinstance(symbols, list):
+        symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    else:
+        symbols = []
+    delay = payload.get("startup_delay_seconds")
+    if delay is None:
+        delay = current["startup_delay_seconds"]
+    delay = int(float(delay))
+    if delay < 0:
+        raise ValueError("startup_delay_seconds must be >= 0")
+    gap = payload.get("trade_gap_seconds")
+    if gap is None:
+        gap = current["trade_gap_seconds"]
+    gap = int(float(gap))
+    if gap < 0:
+        raise ValueError("trade_gap_seconds must be >= 0")
+    tp_count = payload.get("tp_count")
+    if tp_count is None:
+        tp_count = current["tp_count"]
+    tp_count = int(float(tp_count))
+    if tp_count < 1 or tp_count > 5:
+        raise ValueError("tp_count must be 1-5")
+    percents = payload.get("tp_percents")
+    if isinstance(percents, str):
+        percents = [_num(p.strip()) for p in percents.replace(";", ",").split(",") if p.strip()]
+    elif isinstance(percents, list):
+        percents = [_num(p) for p in percents]
+    else:
+        percents = []
+    percents = [p for p in percents if p is not None]
+    if not percents:
+        percents = [0.8 * (i + 1) for i in range(tp_count)]
+    percents = percents[:tp_count]
+    while len(percents) < tp_count:
+        percents.append(round(percents[-1] + percents[0], 4))
+    sl = payload.get("sl_percent")
+    sl_n = current["sl_percent"] if sl is None else _num(sl)
+    if sl_n is None or sl_n < 0:
+        raise ValueError("sl_percent must be >= 0")
+    max_open = payload.get("max_open_positions")
+    if max_open is None:
+        max_open = current.get("max_open_positions", 3)
+    max_open = int(float(max_open))
+    if max_open < 1 or max_open > 20:
+        raise ValueError("max_open_positions must be 1-20")
+    set_env_var(session, bot_id, "SCAN_MODE", scan_mode, is_secret=False)
+    set_env_var(session, bot_id, "SYMBOLS", ",".join(symbols), is_secret=False)
+    if symbols:
+        set_env_var(session, bot_id, "SYMBOL", symbols[0], is_secret=False)
+    all_symbols: list[str] = []
+    crypto_symbols: list[str] = []
+    tradfi_symbols: list[str] = hardcoded_tradfi_symbols()
+    scan_error = ""
+    if payload.get("refresh_universe"):
+        universe = fetch_scan_universe()
+        crypto_symbols = list(universe.get("crypto") or [])
+        tradfi_symbols = list(universe.get("tradfi") or hardcoded_tradfi_symbols())
+        all_symbols = symbols_for_mode(universe, scan_mode)
+        if scan_mode in {"ALL", "BINANCE"} and not crypto_symbols:
+            scan_error = universe.get("crypto_error") or "Binance USD-M futures universe unavailable"
+            if scan_mode == "BINANCE":
+                raise ValueError(scan_error)
+        set_env_var(session, bot_id, "ALL_SYMBOLS", ",".join(all_symbols), is_secret=False)
+        set_env_var(session, bot_id, "CRYPTO_SYMBOLS", ",".join(crypto_symbols), is_secret=False)
+        set_env_var(session, bot_id, "TRADFI_SYMBOLS", ",".join(tradfi_symbols), is_secret=False)
+    set_env_var(session, bot_id, "STARTUP_DELAY_SECONDS", str(delay), is_secret=False)
+    set_env_var(session, bot_id, "TRADE_GAP_SECONDS", str(gap), is_secret=False)
+    set_env_var(session, bot_id, "TP_COUNT", str(tp_count), is_secret=False)
+    set_env_var(session, bot_id, "TP_PERCENTS", ",".join(str(p) for p in percents), is_secret=False)
+    set_env_var(session, bot_id, "TP_PERCENT", str(percents[0]), is_secret=False)
+    set_env_var(session, bot_id, "SL_PERCENT", str(sl_n), is_secret=False)
+    set_env_var(session, bot_id, "MAX_OPEN_POSITIONS", str(max_open), is_secret=False)
+    _audit(session, "RUNTIME_SETTINGS_CHANGED", bot_id, f"scan={scan_mode} delay={delay} gap={gap} tp={tp_count} max_open={max_open}")
+    result = get_runtime_settings(session, bot_id)
+    if all_symbols:
+        result["all_symbols"] = all_symbols[:40]
+        result["all_symbol_count"] = len(all_symbols)
+    if crypto_symbols:
+        result["crypto_symbols"] = crypto_symbols[:40]
+        result["crypto_symbol_count"] = len(crypto_symbols)
+    result["tradfi_symbols"] = tradfi_symbols[:40]
+    result["tradfi_symbol_count"] = len(tradfi_symbols)
+    result["universe_label"] = _universe_label(scan_mode)
+    result["scan_error"] = scan_error
+    return result
+
+
+def _universe_label(scan_mode: str) -> str:
+    mode = normalize_scan_mode(scan_mode)
+    return {
+        "ALL": "Binance Futures + US TradFi",
+        "BINANCE": "Binance Futures",
+        "TRADFI": "US TradFi",
+        "SELECTED": "Binance Futures + US TradFi",
+    }.get(mode, mode)
+
+
+def fetch_scan_universe() -> dict:
+    return fetch_binance_futures_universe()
+
+
+def fetch_binance_usdm_symbols() -> list[str]:
+    universe = fetch_scan_universe()
+    crypto = list(universe.get("crypto") or [])
+    if not crypto:
+        raise ValueError(universe.get("crypto_error") or "Binance USD-M futures universe unavailable")
+    return crypto
+
+
 DEMO_ENV_DEFAULTS = {
     "BOT_NAME": "Demo Trading Bot",
     "TRADING_MODE": "PAPER",
+    "SCAN_MODE": "ALL",
     "SYMBOL": "BTCUSDT",
+    "SYMBOLS": "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT",
     "CYCLE_SECONDS": "1",
     "INITIAL_BALANCE": "10000",
     "POSITION_SIZE_USDT": "500",
+    "TP_COUNT": "2",
+    "TP_PERCENTS": "0.8,1.6",
     "TP_PERCENT": "0.8",
     "SL_PERCENT": "0.5",
+    "STARTUP_DELAY_SECONDS": "180",
+    "TRADE_GAP_SECONDS": "180",
+    "MAX_OPEN_POSITIONS": "3",
     "REPORT_INTERVAL_SECONDS": "20",
 }
+
+
+def reset_bot_data(session: Session, bot_id: int) -> dict:
+    bot = _bot_or_404(session, bot_id)
+    if bot.status in {"RUNNING", "STARTING"}:
+        raise PermissionError("Stop the bot before resetting trading data")
+    counts = {
+        "signals": session.query(Signal).filter(Signal.bot_id == bot_id).delete(synchronize_session=False),
+        "positions": session.query(Position).filter(Position.bot_id == bot_id).delete(synchronize_session=False),
+        "trades": session.query(Trade).filter(Trade.bot_id == bot_id).delete(synchronize_session=False),
+        "events": session.query(Event).filter(Event.bot_id == bot_id).delete(synchronize_session=False),
+        "logs": session.query(LogLine).filter(LogLine.bot_id == bot_id).delete(synchronize_session=False),
+        "reports": session.query(Report).filter(Report.bot_id == bot_id).delete(synchronize_session=False),
+    }
+    bot.last_error = ""
+    bot.last_heartbeat = None
+    _audit(session, "BOT_DATA_RESET", bot_id, json.dumps(counts))
+    return {"ok": True, "cleared": counts}
+
+STRATEGY_EDITABLE_SUFFIXES = {".py", ".json", ".yml", ".yaml", ".toml", ".txt", ".cfg", ".ini", ".md"}
+STRATEGY_MAX_BYTES = 512_000
 
 
 def ensure_demo_bot(session: Session) -> dict | None:

@@ -29,6 +29,10 @@ EVENT_TYPES = {
     "ORDER_REJECTED",
     "REPORT_HOURLY",
     "REPORT_4H",
+    "STARTUP_DELAY",
+    "TRADE_COOLDOWN",
+    "SCAN_UNIVERSE",
+    "SCAN_UNAVAILABLE",
 }
 
 CATEGORY_MAP = {
@@ -55,6 +59,10 @@ CATEGORY_MAP = {
     "ORDER_REJECTED": "BINANCE",
     "REPORT_HOURLY": "SYSTEM",
     "REPORT_4H": "SYSTEM",
+    "STARTUP_DELAY": "SYSTEM",
+    "TRADE_COOLDOWN": "SYSTEM",
+    "SCAN_UNIVERSE": "SYSTEM",
+    "SCAN_UNAVAILABLE": "ERROR",
 }
 
 CBC_PREFIX = "CBC_EVENT "
@@ -165,7 +173,10 @@ def format_activity_message(event: dict) -> str:
         parts = [f"SIGNAL {symbol} {side}".strip()]
         if event.get("entry") is not None:
             parts.append(f"Entry {event['entry']}")
-        if event.get("tp") is not None:
+        tps = event.get("tps") if isinstance(event.get("tps"), list) else None
+        if tps:
+            parts.append("TP " + "/".join(str(x) for x in tps))
+        elif event.get("tp") is not None:
             parts.append(f"TP {event['tp']}")
         if event.get("sl") is not None:
             parts.append(f"SL {event['sl']}")
@@ -186,4 +197,15 @@ def format_activity_message(event: dict) -> str:
         return event.get("message") or f"ORDER rejected {event.get('reason') or ''}".strip()
     if t in {"REPORT_HOURLY", "REPORT_4H"}:
         return event.get("message") or f"{t} realized {event.get('realized_pnl')} unrealized {event.get('unrealized_pnl')}"
+    if t == "SCAN_UNIVERSE":
+        label = event.get("universe") or event.get("scan_mode") or "ALL"
+        count = event.get("count")
+        crypto_count = event.get("crypto_count")
+        tradfi_count = event.get("tradfi_count")
+        extra = ""
+        if crypto_count is not None or tradfi_count is not None:
+            extra = f" crypto {crypto_count or 0} tradfi {tradfi_count or 0}"
+        return f"SCAN {label} symbols {count}{extra}".strip()
+    if t == "SCAN_UNAVAILABLE":
+        return event.get("message") or "Scan universe unavailable"
     return event.get("message") or t
