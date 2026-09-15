@@ -17,6 +17,16 @@ function fmt(n, d = 2) {
   return x.toFixed(d);
 }
 
+function fmtPrice(n) {
+  if (n === null || n === undefined || n === "") return "—";
+  const x = Number(n);
+  if (Number.isNaN(x)) return String(n);
+  const abs = Math.abs(x);
+  if (abs === 0) return "0";
+  const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 6 : 8;
+  return x.toFixed(digits);
+}
+
 function pnlClass(n) {
   const x = Number(n || 0);
   return x > 0 ? "ok" : x < 0 ? "err" : "";
@@ -33,8 +43,8 @@ function duration(seconds) {
 }
 
 function fmtTps(tps, fallback) {
-  if (Array.isArray(tps) && tps.length) return tps.map((n) => fmt(n)).join(" / ");
-  return fmt(fallback);
+  if (Array.isArray(tps) && tps.length) return tps.map((n) => fmtPrice(n)).join(" / ");
+  return fmtPrice(fallback);
 }
 
 async function api(path, opts = {}) {
@@ -438,10 +448,10 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
             <td>{p.number}</td>
             <td>{p.symbol}</td>
             <td>{p.side}</td>
-            <td>{fmt(p.entry)}</td>
-            <td>{fmt(open ? p.current_price : p.exit)}</td>
+            <td>{fmtPrice(p.entry)}</td>
+            <td>{fmtPrice(open ? p.current_price : p.exit)}</td>
             <td>{fmtTps(p.tps, p.tp)}</td>
-            <td>{fmt(p.sl)}</td>
+            <td>{fmtPrice(p.sl)}</td>
             <td className={pnlClass(open ? p.unrealized_pnl : p.realized_pnl)}>
               {fmt(open ? p.unrealized_pnl : p.realized_pnl)}
             </td>
@@ -477,9 +487,9 @@ function Signals({ signals }) {
               <td>{(s.time || "").slice(11, 19)}</td>
               <td>{s.symbol}</td>
               <td>{s.side}</td>
-              <td>{fmt(s.entry)}</td>
+              <td>{fmtPrice(s.entry)}</td>
               <td>{fmtTps(s.tps, s.tp)}</td>
-              <td>{fmt(s.sl)}</td>
+              <td>{fmtPrice(s.sl)}</td>
               <td>{fmt(s.confidence, 2)}</td>
               <td>{s.strategy || "—"}</td>
               <td>{s.execution_status}</td>
