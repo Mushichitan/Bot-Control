@@ -73,6 +73,8 @@ The app never asks for Binance withdrawal permission.
 
 Statuses: STOPPED, STARTING, RUNNING, PAUSED, STOPPING, CRASHED, ERROR, UPDATING
 
+Any position still marked OPEN from a previous process is closed on Start with reason `BOT_RESTART`, so the dashboard never shows phantom open positions a fresh process cannot manage.
+
 ## Telegram
 
 The Control Center does not replace Telegram. If the bot already sends messages, it keeps doing so.

@@ -998,6 +998,30 @@ def test_hermis_uses_live_candles_for_sl_tp():
     assert signal["entry"] - signal["sl"] > 0
 
 
+def test_reconcile_stale_positions_on_start(mock_bot_path):
+    with session_scope() as s:
+        bot = _ready_bot(s, mock_bot_path, "Reconcile Bot")
+        bid = bot["id"]
+        services.ingest_event(
+            s,
+            bid,
+            {"type": "POSITION_OPENED", "position_id": "stale-a", "symbol": "BTCUSDT", "side": "LONG", "entry": 100, "quantity": 1, "tp": 110, "sl": 90},
+        )
+        services.ingest_event(
+            s,
+            bid,
+            {"type": "POSITION_OPENED", "position_id": "stale-b", "symbol": "ETHUSDT", "side": "SHORT", "entry": 200, "quantity": 1, "tp": 190, "sl": 210},
+        )
+        assert s.query(Position).filter(Position.bot_id == bid, Position.status == "OPEN").count() == 2
+        closed = services.reconcile_stale_positions(s, bid)
+        assert closed == 2
+        assert s.query(Position).filter(Position.bot_id == bid, Position.status == "OPEN").count() == 0
+        trades = s.query(Trade).filter(Trade.bot_id == bid).all()
+        assert len(trades) == 2
+        assert all(t.close_reason == "BOT_RESTART" for t in trades)
+        assert services.reconcile_stale_positions(s, bid) == 0
+
+
 def test_reset_bot_data(mock_bot_path):
     with session_scope() as s:
         bot = _ready_bot(s, mock_bot_path, "Reset Bot")

@@ -553,9 +553,40 @@ def start_bot(session: Session, bot_id: int, live_confirmed: bool = False, from_
     bot.status = "RUNNING"
     bot.last_error = ""
     bot.last_heartbeat = utcnow()
+    reconcile_stale_positions(session, bot.id)
     ingest_event(session, bot.id, {"type": "BOT_STARTED", "message": "Bot started"}, source="controller")
     _audit(session, "BOT_STARTED", bot.id, f"pid={pid} mode={bot.trading_mode}")
     return bot_to_dict(bot, session)
+
+
+def reconcile_stale_positions(session: Session, bot_id: int, reason: str = "BOT_RESTART") -> int:
+    stale = (
+        session.query(Position)
+        .filter(Position.bot_id == bot_id, Position.status == "OPEN")
+        .all()
+    )
+    for pos in stale:
+        ingest_event(
+            session,
+            bot_id,
+            {
+                "type": "POSITION_CLOSED",
+                "internal_id": pos.id,
+                "position_id": pos.external_id or str(pos.display_number),
+                "id": pos.external_id or str(pos.id),
+                "symbol": pos.symbol,
+                "side": pos.side,
+                "exit": pos.current_price or pos.entry_price,
+                "exit_price": pos.current_price or pos.entry_price,
+                "realized_pnl": 0.0,
+                "close_reason": reason,
+                "message": f"Stale position {pos.symbol} #{pos.display_number} closed on start ({reason})",
+            },
+            source="controller",
+        )
+    if stale:
+        _audit(session, "POSITIONS_RECONCILED", bot_id, f"closed {len(stale)} stale position(s): {reason}")
+    return len(stale)
 
 
 def stop_bot(session: Session, bot_id: int) -> dict:
