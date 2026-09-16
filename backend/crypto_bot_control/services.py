@@ -706,6 +706,10 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
                 tp=_num(payload.get("tp")) if _num(payload.get("tp")) is not None else (tps[-1] if tps else None),
                 sl=_num(payload.get("sl")),
                 tps_json=json.dumps(tps),
+                hit_tps_json="[]",
+                tp_hits=0,
+                tps_total=len(tps),
+                booked_pnl=0.0,
                 unrealized_pnl=_num(payload.get("unrealized_pnl")) or 0.0,
                 pnl_pct=_num(payload.get("pnl_pct")),
                 strategy=str(payload.get("strategy") or ""),
@@ -729,6 +733,7 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
         if extra_tps:
             pos.tps_json = json.dumps(extra_tps)
             pos.tp = extra_tps[-1]
+        _apply_tp_tracking(pos, payload)
         return
     if t in {"TP_HIT", "SL_HIT", "POSITION_CLOSED"} and pos:
         remaining = _num(payload.get("remaining_quantity") or payload.get("quantity_remaining"))
@@ -745,8 +750,12 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
             extra_tps = _extract_tps(payload)
             if extra_tps:
                 pos.tps_json = json.dumps(extra_tps)
+            _apply_tp_tracking(pos, payload, hit=payload.get("tp"))
             return
         reason = "TP" if t == "TP_HIT" else "SL" if t == "SL_HIT" else str(payload.get("close_reason") or "MANUAL")
+        _apply_tp_tracking(pos, payload, hit=payload.get("tp"))
+        if payload.get("tps_total") is None and not pos.tps_total:
+            pos.tps_total = len(_parse_tps_json(pos.tps_json))
         pos.status = "CLOSED"
         pos.close_reason = reason
         pos.exit_price = _num(payload.get("exit") or payload.get("exit_price") or payload.get("current_price"))
@@ -761,6 +770,9 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
                 symbol=pos.symbol,
                 side=pos.side,
                 realized_pnl=pos.realized_pnl or 0.0,
+                booked_pnl=pos.booked_pnl or 0.0,
+                tp_hits=pos.tp_hits or 0,
+                tps_total=pos.tps_total or 0,
                 pnl_pct=pos.pnl_pct,
                 close_reason=reason,
                 is_win=(pos.realized_pnl or 0.0) > 0,
@@ -784,7 +796,7 @@ def close_position(session: Session, bot_id: int, position_id: int, reason: str 
     if pos.status != "OPEN":
         raise ValueError("Position is not open")
     exit_price = pos.current_price if pos.current_price is not None else pos.entry_price
-    pnl = pos.unrealized_pnl if pos.unrealized_pnl is not None else 0.0
+    pnl = round((pos.booked_pnl or 0.0) + (pos.unrealized_pnl or 0.0), 2)
     ingest_event(
         session,
         bot.id,
@@ -798,6 +810,9 @@ def close_position(session: Session, bot_id: int, position_id: int, reason: str 
             "exit": exit_price,
             "exit_price": exit_price,
             "realized_pnl": pnl,
+            "booked_pnl": pos.booked_pnl or 0.0,
+            "tp_hits": pos.tp_hits or 0,
+            "hit_tps": _parse_tps_json(pos.hit_tps_json),
             "close_reason": reason or "MANUAL",
             "partial": False,
         },
@@ -823,6 +838,28 @@ def close_position(session: Session, bot_id: int, position_id: int, reason: str 
         "exit": pos.exit_price,
         "realized_pnl": pos.realized_pnl,
     }
+
+
+def _apply_tp_tracking(pos: Position, payload: dict, hit: Any = None) -> None:
+    if payload.get("booked_pnl") is not None:
+        pos.booked_pnl = _num(payload.get("booked_pnl")) or 0.0
+    if payload.get("tp_hits") is not None:
+        pos.tp_hits = int(_num(payload.get("tp_hits")) or 0)
+    total = _num(payload.get("tps_total"))
+    if total is not None and total > 0:
+        pos.tps_total = max(pos.tps_total or 0, int(total))
+    hits = None
+    if isinstance(payload.get("hit_tps"), list):
+        hits = [_num(x) for x in payload.get("hit_tps") if _num(x) is not None]
+    elif hit is not None:
+        existing = _parse_tps_json(pos.hit_tps_json)
+        value = _num(hit)
+        if value is not None and value not in existing:
+            hits = existing + [value]
+    if hits is not None:
+        pos.hit_tps_json = json.dumps(hits)
+        if payload.get("tp_hits") is None:
+            pos.tp_hits = len(hits)
 
 
 def _write_bot_command(bot: Bot, command: dict) -> None:

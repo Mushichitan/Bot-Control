@@ -521,6 +521,100 @@ def test_multi_tp_signal_and_position_ingestion(mock_bot_path):
         assert sig.tp == 103
         assert json.loads(pos.tps_json) == [101, 102, 103]
         assert pos.tp == 103
+        assert pos.tps_total == 3
+        assert pos.tp_hits == 0
+        assert pos.booked_pnl == 0.0
+
+
+def test_tp_hits_and_booked_pnl_tracking(mock_bot_path):
+    with session_scope() as s:
+        bot = _ready_bot(s, mock_bot_path, "TP Track Bot")
+        bid = bot["id"]
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "POSITION_OPENED",
+                "position_id": "p-tp",
+                "symbol": "BTCUSDT",
+                "side": "LONG",
+                "entry": 100,
+                "tps": [110, 120, 130],
+                "sl": 90,
+                "quantity": 3,
+            },
+        )
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "TP_HIT",
+                "position_id": "p-tp",
+                "symbol": "BTCUSDT",
+                "tp": 110,
+                "partial": True,
+                "remaining_quantity": 2,
+                "tps": [120, 130],
+                "hit_tps": [110],
+                "tp_hits": 1,
+                "tps_total": 3,
+                "booked_pnl": 4.5,
+                "realized_pnl": 4.5,
+            },
+        )
+        pos = s.query(Position).filter(Position.bot_id == bid).one()
+        assert pos.status == "OPEN"
+        assert pos.tp_hits == 1
+        assert pos.tps_total == 3
+        assert pos.booked_pnl == 4.5
+        assert json.loads(pos.hit_tps_json) == [110]
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "TP_HIT",
+                "position_id": "p-tp",
+                "symbol": "BTCUSDT",
+                "tp": 120,
+                "partial": True,
+                "remaining_quantity": 1,
+                "tps": [130],
+                "hit_tps": [110, 120],
+                "tp_hits": 2,
+                "tps_total": 3,
+                "booked_pnl": 9.25,
+                "realized_pnl": 4.75,
+            },
+        )
+        pos = s.query(Position).filter(Position.bot_id == bid).one()
+        assert pos.tp_hits == 2
+        assert pos.booked_pnl == 9.25
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "POSITION_CLOSED",
+                "position_id": "p-tp",
+                "symbol": "BTCUSDT",
+                "exit": 130,
+                "realized_pnl": 14.75,
+                "booked_pnl": 9.25,
+                "tp_hits": 3,
+                "tps_total": 3,
+                "close_reason": "TP",
+                "closed_at": "2026-01-01T01:00:00+00:00",
+            },
+        )
+        pos = s.query(Position).filter(Position.bot_id == bid).one()
+        assert pos.status == "CLOSED"
+        assert pos.close_reason == "TP"
+        trade = s.query(Trade).filter(Trade.bot_id == bid).one()
+        assert trade.booked_pnl == 9.25
+        assert trade.tp_hits == 3
+        assert trade.tps_total == 3
+        assert trade.realized_pnl == 14.75
+        assert trade.opened_at is not None
+        assert trade.closed_at is not None
 
 
 def test_partial_tp_keeps_position_open(mock_bot_path):

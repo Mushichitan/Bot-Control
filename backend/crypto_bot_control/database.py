@@ -146,6 +146,10 @@ class Position(Base):
     tp: Mapped[float | None] = mapped_column(Float, nullable=True)
     sl: Mapped[float | None] = mapped_column(Float, nullable=True)
     tps_json: Mapped[str] = mapped_column(Text, default="[]")
+    hit_tps_json: Mapped[str] = mapped_column(Text, default="[]")
+    tp_hits: Mapped[int] = mapped_column(Integer, default=0)
+    tps_total: Mapped[int] = mapped_column(Integer, default=0)
+    booked_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -166,6 +170,9 @@ class Trade(Base):
     symbol: Mapped[str] = mapped_column(String(40), default="")
     side: Mapped[str] = mapped_column(String(10), default="")
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    booked_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    tp_hits: Mapped[int] = mapped_column(Integer, default=0)
+    tps_total: Mapped[int] = mapped_column(Integer, default=0)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     close_reason: Mapped[str] = mapped_column(String(40), default="")
     is_win: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -249,6 +256,13 @@ def _ensure_extra_columns(engine) -> None:
     extras = (
         ("signals", "tps_json", "TEXT"),
         ("positions", "tps_json", "TEXT"),
+        ("positions", "hit_tps_json", "TEXT"),
+        ("positions", "tp_hits", "INTEGER DEFAULT 0"),
+        ("positions", "tps_total", "INTEGER DEFAULT 0"),
+        ("positions", "booked_pnl", "FLOAT DEFAULT 0"),
+        ("trades", "booked_pnl", "FLOAT DEFAULT 0"),
+        ("trades", "tp_hits", "INTEGER DEFAULT 0"),
+        ("trades", "tps_total", "INTEGER DEFAULT 0"),
     )
     with engine.begin() as conn:
         for table, column, coltype in extras:

@@ -32,6 +32,14 @@ function pnlClass(n) {
   return x > 0 ? "ok" : x < 0 ? "err" : "";
 }
 
+function shortTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso).slice(11, 16);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function duration(seconds) {
   if (seconds == null) return "—";
   const h = Math.floor(seconds / 3600);
@@ -346,6 +354,29 @@ function Dashboard({ bot, health, today, open, signals, events, logs, botId, run
           <div>{runtime?.universe_label || runtime?.scan_mode || "ALL"}</div>
           <div className="muted">Symbols {runtime?.all_symbol_count || 0} · Crypto {runtime?.crypto_symbol_count || 0} · TradFi {runtime?.tradfi_symbol_count || 0}</div>
           <div className="muted" style={{ marginTop: 8 }}>Startup delay {runtime?.startup_delay_seconds || 0}s · Trade gap {runtime?.trade_gap_seconds || 0}s</div>
+          <div className="muted" style={{ marginTop: 8 }}>
+            Open positions {open.length} / limit {runtime?.max_open_positions ?? 3}
+          </div>
+          <div className="row" style={{ marginTop: 6 }}>
+            {[3, 5, 10, 20].map((n) => (
+              <button
+                key={n}
+                className={`btn ${Number(runtime?.max_open_positions) === n ? "primary" : "ghost"}`}
+                onClick={async () => {
+                  try {
+                    await api(`/api/bots/${botId}/runtime-settings`, {
+                      method: "POST",
+                      body: JSON.stringify({ max_open_positions: n }),
+                    });
+                    setNotice(`Open position limit set to ${n}. Restart the bot to apply.`);
+                    if (onRefresh) await onRefresh();
+                  } catch (e) {
+                    setError(e.message);
+                  }
+                }}
+              >{n}</button>
+            ))}
+          </div>
           {scanEvt ? <div className="muted" style={{ marginTop: 8 }}>{scanEvt.message}</div> : null}
           {delayEvt ? <div className="muted">{delayEvt.message}</div> : null}
           {gapEvt ? <div className="muted">{gapEvt.message}</div> : null}
@@ -363,7 +394,11 @@ function Dashboard({ bot, health, today, open, signals, events, logs, botId, run
           <h3>Open positions</h3>
           {open.slice(0, 6).map((p) => (
             <div key={p.id} className="row">
-              <div>{p.number} {p.symbol} {p.side} <span className={pnlClass(p.unrealized_pnl)}>{fmt(p.unrealized_pnl)}</span></div>
+              <div>
+                {p.number} {p.symbol} {p.side}{" "}
+                <span className={pnlClass(p.unrealized_pnl)}>{fmt(p.unrealized_pnl)}</span>{" "}
+                <span className="muted">TPs {p.tp_hits || 0}/{p.tps_total || 0} · booked {fmt(p.booked_pnl)} · {duration(p.duration_seconds)}</span>
+              </div>
               <button className="btn danger" onClick={async () => {
                 try {
                   setNotice(`Closing ${p.number} ${p.symbol}…`);
@@ -438,7 +473,7 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
         <tr>
           <th>#</th><th>Symbol</th><th>Side</th><th>Entry</th>
           <th>{open ? "Current" : "Exit"}</th><th>TP</th><th>SL</th>
-          <th>P&L</th><th>Reason</th><th>Dur</th>
+          <th>TPs</th><th>Booked</th><th>P&L</th><th>Opened</th><th>Closed</th><th>Dur</th><th>Reason</th>
           {open ? <th></th> : null}
         </tr>
       </thead>
@@ -452,11 +487,15 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
             <td>{fmtPrice(open ? p.current_price : p.exit)}</td>
             <td>{fmtTps(p.tps, p.tp)}</td>
             <td>{fmtPrice(p.sl)}</td>
+            <td title={(p.hit_tps || []).join(" / ")}>{p.tp_hits || 0}/{p.tps_total || 0}</td>
+            <td className={pnlClass(p.booked_pnl)}>{fmt(p.booked_pnl)}</td>
             <td className={pnlClass(open ? p.unrealized_pnl : p.realized_pnl)}>
               {fmt(open ? p.unrealized_pnl : p.realized_pnl)}
             </td>
-            <td>{p.close_reason || p.status}</td>
+            <td>{shortTime(p.opened_at)}</td>
+            <td>{shortTime(p.closed_at)}</td>
             <td>{duration(p.duration_seconds)}</td>
+            <td>{p.close_reason || p.status}</td>
             {open ? (
               <td>
                 <button className="btn danger" disabled={busyId === p.id} onClick={() => closePos(p)}>Close</button>

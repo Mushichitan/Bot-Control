@@ -81,6 +81,8 @@ class TradingSimulator:
             "tps": tps,
             "remaining_tps": remaining,
             "hit_tps": [],
+            "tp_hits": 0,
+            "booked_pnl": 0.0,
             "sl": s["sl"],
             "unrealized_pnl": 0.0,
             "realized_pnl": 0.0,
@@ -129,6 +131,10 @@ class TradingSimulator:
                 current_price=p["current_price"],
                 tp=p["tp"],
                 tps=p.get("remaining_tps") or p.get("tps") or [],
+                hit_tps=list(p.get("hit_tps") or []),
+                tp_hits=p.get("tp_hits", 0),
+                tps_total=len(p.get("tps") or []),
+                booked_pnl=p.get("booked_pnl", 0.0),
                 sl=p["sl"],
                 quantity=p["quantity"],
                 unrealized_pnl=p["unrealized_pnl"],
@@ -149,11 +155,13 @@ class TradingSimulator:
         remaining.pop(0)
         p["remaining_tps"] = remaining
         p["hit_tps"].append(hit)
+        p["tp_hits"] = len(p["hit_tps"])
         slices = max(1, len(p.get("tps") or [hit]))
         slice_qty = p["initial_quantity"] / slices
         close_qty = min(p["quantity"], slice_qty)
         realized = round(self._pnl(p, price, close_qty), 2)
         p["realized_pnl"] = round(p.get("realized_pnl", 0.0) + realized, 2)
+        p["booked_pnl"] = round(p.get("booked_pnl", 0.0) + realized, 2)
         p["quantity"] = round(max(0.0, p["quantity"] - close_qty), 6)
         last = not remaining or p["quantity"] <= 1e-9
         payload = {
@@ -165,6 +173,10 @@ class TradingSimulator:
             "exit": round(price, 2),
             "tp": hit,
             "tps": remaining,
+            "hit_tps": list(p["hit_tps"]),
+            "tp_hits": p["tp_hits"],
+            "tps_total": len(p.get("tps") or []),
+            "booked_pnl": p["booked_pnl"],
             "sl": p["sl"],
             "realized_pnl": realized,
             "partial": not last,
@@ -198,9 +210,15 @@ class TradingSimulator:
             "exit": round(exit_price, 2),
             "tp": p.get("tp"),
             "tps": p.get("tps") or [],
+            "hit_tps": list(p.get("hit_tps") or []),
+            "tp_hits": p.get("tp_hits", 0),
+            "tps_total": len(p.get("tps") or []),
+            "booked_pnl": p.get("booked_pnl", 0.0),
             "sl": p["sl"],
             "realized_pnl": round(pnl, 2),
             "close_reason": reason,
+            "opened_at": p.get("opened_at"),
+            "closed_at": time.time(),
             "status": "CLOSED",
         }
         if not already_emitted:
