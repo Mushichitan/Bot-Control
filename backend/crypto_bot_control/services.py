@@ -628,6 +628,14 @@ def resume_bot(session: Session, bot_id: int) -> dict:
 def ingest_event(session: Session, bot_id: int, payload: dict, source: str = "bot") -> Event:
     event_type = str(payload.get("type") or "").upper()
     payload["category"] = payload.get("category") or CATEGORY_MAP.get(event_type, "SYSTEM")
+    if event_type == "BOT_STARTED" and payload.get("last_position_id") is None:
+        last_pos = (
+            session.query(Position)
+            .filter(Position.bot_id == bot_id)
+            .order_by(Position.id.desc())
+            .first()
+        )
+        payload["last_position_id"] = last_pos.id if last_pos else 0
     message = redact_text(payload.get("message") or format_activity_message(payload))
     clean = {k: v for k, v in payload.items() if k != "secrets"}
     event = Event(
@@ -685,13 +693,7 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
         )
         return
     if t == "POSITION_OPENED":
-        last = (
-            session.query(Position)
-            .filter(Position.bot_id == bot_id)
-            .order_by(Position.display_number.desc())
-            .first()
-        )
-        number = (last.display_number + 1) if last else 1
+        number = _next_run_display_number(session, bot_id)
         tps = _extract_tps(payload)
         session.add(
             Position(
@@ -870,6 +872,42 @@ def _write_bot_command(bot: Bot, command: dict) -> None:
     payload["ts"] = utcnow().isoformat()
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
+
+
+def _next_run_display_number(session: Session, bot_id: int) -> int:
+    started = (
+        session.query(Event)
+        .filter(Event.bot_id == bot_id, Event.event_type == "BOT_STARTED")
+        .order_by(Event.id.desc())
+        .first()
+    )
+    last_id = 0
+    if started:
+        try:
+            last_id = int((json.loads(started.payload_json or "{}") or {}).get("last_position_id") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            last_id = 0
+        if not last_id and started.created_at:
+            prior = (
+                session.query(Position)
+                .filter(Position.bot_id == bot_id, Position.opened_at < started.created_at)
+                .order_by(Position.id.desc())
+                .first()
+            )
+            last_id = prior.id if prior else 0
+        count = (
+            session.query(Position)
+            .filter(Position.bot_id == bot_id, Position.id > last_id)
+            .count()
+        )
+        return count + 1
+    last = (
+        session.query(Position)
+        .filter(Position.bot_id == bot_id)
+        .order_by(Position.display_number.desc())
+        .first()
+    )
+    return (last.display_number + 1) if last else 1
 
 
 def _find_position(session: Session, bot_id: int, payload: dict) -> Position | None:

@@ -191,6 +191,21 @@ def test_position_numbering(mock_bot_path):
         assert numbers == [1, 2]
 
 
+def test_position_numbering_restarts_after_bot_start(mock_bot_path):
+    with session_scope() as s:
+        bot = _ready_bot(s, mock_bot_path, "Renum Bot")
+        bid = bot["id"]
+        services.ingest_event(s, bid, {"type": "POSITION_OPENED", "position_id": "old-a", "symbol": "AAA", "side": "LONG"})
+        services.ingest_event(s, bid, {"type": "POSITION_OPENED", "position_id": "old-b", "symbol": "BBB", "side": "SHORT"})
+        services.ingest_event(s, bid, {"type": "BOT_STARTED", "message": "Bot started"})
+        services.ingest_event(s, bid, {"type": "POSITION_OPENED", "position_id": "new-1", "symbol": "CCC", "side": "LONG"})
+        services.ingest_event(s, bid, {"type": "POSITION_OPENED", "position_id": "new-2", "symbol": "DDD", "side": "SHORT"})
+        rows = s.query(Position).filter(Position.bot_id == bid).order_by(Position.id).all()
+        assert [p.display_number for p in rows] == [1, 2, 1, 2]
+        assert rows[-2].symbol == "CCC"
+        assert rows[-1].symbol == "DDD"
+
+
 def test_tp_sl_remain_in_history(mock_bot_path):
     with session_scope() as s:
         bot = _ready_bot(s, mock_bot_path, "TPSL Bot")
