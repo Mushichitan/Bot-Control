@@ -101,7 +101,7 @@ Settings -> Scan / Delay / Take profits:
 - Scan mode: ALL SUPPORTED loads live Binance USD-M perpetual symbols from `fapi.binance.com/fapi/v1/exchangeInfo` plus researched US TradFi contracts. Prices come from `fapi.binance.com/fapi/v1/ticker/price` and klines; no fake prices and no coin-select list. Binance Futures and US TradFi can be chosen as the scan universe. If Binance is unreachable, scanning stops instead of inventing prices.
 - Open position limit: 1-20 concurrent positions (default 3). Change it on the Dashboard (3 / 5 / 10 / 20) or in Settings (1 / 2 / 3 / 5 / 10 or custom). New signals are rejected with reason `POSITION_LIMIT` after the limit until a position closes. The Dashboard shows `Open positions X / limit N`. Restart the bot to apply.
 - Startup delay: 3 / 5 / 10 minutes or custom seconds (default 3 minutes). Existing open positions stay manageable during the wait.
-- Trade gap: wait after a close before the next new trade (3 / 5 / 10 minutes or custom)
+- Trade gap: wait this long after an open or a close before the next new trade (3 / 5 / 10 minutes or custom). This prevents several positions from opening in the same scan cycle.
 - Take-profit count: 1 to 5 levels. Live signals use Hermis ATR stops and take-profits from Binance 15m klines, not dummy percents.
 - Reset all data: clears signals, positions, trades, events, reports, and logs for that bot. Stop the bot first. Strategy files and secrets are kept.
 

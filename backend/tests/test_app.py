@@ -1026,6 +1026,37 @@ def test_demo_startup_delay_blocks_open(monkeypatch):
     assert reason == "POSITION_LIMIT"
 
 
+def test_trade_gap_blocks_between_opens(monkeypatch):
+    import importlib
+    import sys
+
+    demo_dir = str(Path(__file__).resolve().parents[2] / "demo_bot")
+    if demo_dir not in sys.path:
+        sys.path.insert(0, demo_dir)
+    monkeypatch.setenv("STARTUP_DELAY_SECONDS", "0")
+    monkeypatch.setenv("TRADE_GAP_SECONDS", "180")
+    monkeypatch.setenv("SCAN_MODE", "TRADFI")
+    monkeypatch.setenv("MAX_OPEN_POSITIONS", "5")
+    for name in ("config", "simulator", "strategy", "universe"):
+        sys.modules.pop(name, None)
+    cfg_mod = importlib.import_module("config")
+    sim_mod = importlib.import_module("simulator")
+    events = []
+    sim = sim_mod.TradingSimulator(cfg_mod.Config(), lambda *a, **k: events.append((a, k)))
+    sim.ready_at = 0
+    ok, reason = sim.can_open()
+    assert ok is True
+    sim.open_position({"signal_id": "S1", "symbol": "AAPLUSDT", "side": "LONG", "entry": 100, "sl": 95, "tps": [105]})
+    assert sim.open_count() == 1
+    ok, reason = sim.can_open()
+    assert ok is False
+    assert reason == "TRADE_GAP"
+    sim.last_open_at = 0
+    sim.last_close_at = 0
+    ok, reason = sim.can_open()
+    assert ok is True
+
+
 def test_live_ticker_parser_and_no_fake_price():
     import importlib
     import sys

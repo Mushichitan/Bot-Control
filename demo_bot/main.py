@@ -123,7 +123,10 @@ def main():
                     if signal:
                         signal["market_type"] = cfg.market_type(symbol)
                         emit("SIGNAL_GENERATED", **signal)
+                        before = simulator.open_count()
                         simulator.open_position(signal)
+                        if simulator.open_count() > before:
+                            break
             simulator.emit_report_if_due()
             emit("HEARTBEAT", cycle=cycle, open_positions=simulator.open_count(), symbols=len(cfg.symbols), live_prices=len(prices), source="BINANCE_FAPI")
             time.sleep(cfg.cycle_seconds)

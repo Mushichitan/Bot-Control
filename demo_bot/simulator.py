@@ -28,6 +28,7 @@ class TradingSimulator:
         self.trade_counter = 0
         self.last_report = time.monotonic()
         self.last_close_at = 0.0
+        self.last_open_at = 0.0
         self.ready_at = time.monotonic() + max(0, cfg.startup_delay_seconds)
 
     def set_prices(self, prices):
@@ -43,9 +44,10 @@ class TradingSimulator:
         return max(0.0, self.ready_at - time.monotonic())
 
     def remaining_gap(self):
-        if not self.last_close_at:
+        last = max(self.last_close_at or 0.0, self.last_open_at or 0.0)
+        if not last:
             return 0.0
-        return max(0.0, self.cfg.trade_gap_seconds - (time.monotonic() - self.last_close_at))
+        return max(0.0, self.cfg.trade_gap_seconds - (time.monotonic() - last))
 
     def can_open(self):
         limit = max(1, int(getattr(self.cfg, "max_open_positions", 1) or 1))
@@ -90,6 +92,7 @@ class TradingSimulator:
             "status": "OPEN",
         }
         self.positions[pid] = p
+        self.last_open_at = time.monotonic()
         self.emit(
             "ORDER_SUBMITTED",
             order_id=f"ORD-{self.trade_counter:06d}",
