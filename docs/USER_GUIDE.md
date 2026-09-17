@@ -103,7 +103,7 @@ Settings -> Scan / Delay / Take profits:
 - Startup delay: 3 / 5 / 10 minutes or custom seconds (default 3 minutes). Existing open positions stay manageable during the wait.
 - Trade gap: wait this long after an open or a close before the next new trade (3 / 5 / 10 minutes or custom). This prevents several positions from opening in the same scan cycle.
 - Take-profit count: 1 to 5 levels. Live signals use Hermis ATR stops and take-profits from Binance 15m klines, not dummy percents.
-- Reset all data: clears signals, positions, trades, events, reports, and logs for that bot. Stop the bot first. Strategy files and secrets are kept.
+- Reset all data: the red **Reset All Data** button is always visible in the top bar and at the top of the Dashboard. It stops a running bot, then clears signals, positions, trades, events, reports, and logs. Strategy files and secrets are kept.
 
 Restart the bot after changing scan, limit, delay, gap, or TP values.
 

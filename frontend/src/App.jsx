@@ -111,6 +111,7 @@ export default function App() {
   const [showLive, setShowLive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyKind, setBusyKind] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   const loadBots = useCallback(async () => {
     const list = await api("/api/bots");
@@ -233,6 +234,29 @@ export default function App() {
     }
   }
 
+  async function resetAllData() {
+    if (!bot) return;
+    if (!window.confirm("Reset all signals, positions, trades, events, and logs for this bot? Strategy files and secrets stay.")) return;
+    setResetting(true);
+    setError("");
+    try {
+      const running = ["RUNNING", "STARTING", "PAUSED"].includes(String(bot.status || "").toUpperCase());
+      if (running) {
+        setNotice("Stopping bot before data reset…");
+        await api(`/api/bots/${bot.id}/stop`, { method: "POST", body: "{}" });
+      }
+      await api(`/api/bots/${bot.id}/reset-data`, { method: "POST", body: "{}" });
+      setNotice("All trading data reset.");
+      await loadBots();
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+      setNotice("");
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -271,6 +295,7 @@ export default function App() {
             <button className="btn primary" disabled={busy || !bot} onClick={() => control("start")}>{busyKind === "start" ? "Starting…" : "Start"}</button>
             <button className="btn danger" disabled={busy || !bot} onClick={() => control("stop")}>{busyKind === "stop" ? "Stopping…" : "Stop"}</button>
             <button className="btn ghost" disabled={busy || !bot} onClick={() => control("restart")}>{busyKind === "restart" ? "Restarting…" : "Restart"}</button>
+            <button className="btn danger" disabled={busy || resetting || !bot} onClick={resetAllData}>{resetting ? "Resetting…" : "Reset All Data"}</button>
             {bot?.pause_supported ? (
               <>
                 <button className="btn ghost" disabled={busy} onClick={() => control("pause")}>Pause</button>
@@ -285,7 +310,7 @@ export default function App() {
           {!bot ? (
             <div className="panel empty">Import a Python trading-bot project to get started. The app never invents trading logic.</div>
           ) : page === "Dashboard" ? (
-            <Dashboard bot={bot} health={health} today={today} open={open} signals={signals} events={events} logs={logs} botId={botId} runtime={runtime} onRefresh={refresh} setError={setError} setNotice={setNotice} />
+            <Dashboard bot={bot} health={health} today={today} open={open} signals={signals} events={events} logs={logs} botId={botId} runtime={runtime} onRefresh={refresh} setError={setError} setNotice={setNotice} onReset={resetAllData} resetting={resetting} />
           ) : page === "Positions" ? (
             <Positions open={open} closed={closed} botId={botId} onRefresh={refresh} setError={setError} setNotice={setNotice} />
           ) : page === "Signals" ? (
@@ -330,13 +355,20 @@ export default function App() {
   );
 }
 
-function Dashboard({ bot, health, today, open, signals, events, logs, botId, runtime, onRefresh, setError, setNotice }) {
+function Dashboard({ bot, health, today, open, signals, events, logs, botId, runtime, onRefresh, setError, setNotice, onReset, resetting }) {
   const uptime = bot.last_heartbeat ? new Date(bot.last_heartbeat).toLocaleTimeString() : "—";
   const delayEvt = [...events].reverse().find((e) => e.type === "STARTUP_DELAY");
   const gapEvt = [...events].reverse().find((e) => e.type === "TRADE_COOLDOWN");
   const scanEvt = [...events].reverse().find((e) => e.type === "SCAN_UNIVERSE");
   return (
     <>
+      <div className="panel reset-bar">
+        <div>
+          <h3>Data reset</h3>
+          <p className="help">Clears signals, positions, trades, events, and logs. Strategy files and secrets stay. Stops the bot first if it is running.</p>
+        </div>
+        <button className="btn danger" disabled={resetting} onClick={onReset}>{resetting ? "Resetting…" : "Reset All Data"}</button>
+      </div>
       <div className="cards">
         <StatusCard title="Bot" value={health.bot || bot.status} sub={`Last heartbeat ${uptime}`} />
         <StatusCard title="Binance" value={health.binance || bot.binance_status} />
