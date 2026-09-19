@@ -35,16 +35,17 @@ function pnlClass(n) {
 function shortTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso).slice(11, 16);
+  if (Number.isNaN(d.getTime())) return String(iso).slice(11, 19) || "—";
   const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function duration(seconds) {
   if (seconds == null) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${s}s`;
   return `${s}s`;
@@ -238,9 +239,11 @@ export default function App() {
     if (!bot) return;
     if (!window.confirm("Reset all signals, positions, trades, events, and logs for this bot? Strategy files and secrets stay.")) return;
     setResetting(true);
+    setBusy(true);
     setError("");
     try {
-      const running = ["RUNNING", "STARTING", "PAUSED"].includes(String(bot.status || "").toUpperCase());
+      const live = await api(`/api/bots/${bot.id}`);
+      const running = ["RUNNING", "STARTING", "PAUSED", "STOPPING"].includes(String(live.status || bot.status || "").toUpperCase());
       if (running) {
         setNotice("Stopping bot before data reset…");
         await api(`/api/bots/${bot.id}/stop`, { method: "POST", body: "{}" });
@@ -254,6 +257,7 @@ export default function App() {
       setNotice("");
     } finally {
       setResetting(false);
+      setBusy(false);
     }
   }
 
@@ -292,9 +296,9 @@ export default function App() {
             </div>
           </div>
           <div className="controls">
-            <button className="btn primary" disabled={busy || !bot} onClick={() => control("start")}>{busyKind === "start" ? "Starting…" : "Start"}</button>
-            <button className="btn danger" disabled={busy || !bot} onClick={() => control("stop")}>{busyKind === "stop" ? "Stopping…" : "Stop"}</button>
-            <button className="btn ghost" disabled={busy || !bot} onClick={() => control("restart")}>{busyKind === "restart" ? "Restarting…" : "Restart"}</button>
+            <button className="btn primary" disabled={busy || resetting || !bot} onClick={() => control("start")}>{busyKind === "start" ? "Starting…" : "Start"}</button>
+            <button className="btn danger" disabled={busy || resetting || !bot} onClick={() => control("stop")}>{busyKind === "stop" ? "Stopping…" : "Stop"}</button>
+            <button className="btn ghost" disabled={busy || resetting || !bot} onClick={() => control("restart")}>{busyKind === "restart" ? "Restarting…" : "Restart"}</button>
             <button className="btn danger" disabled={busy || resetting || !bot} onClick={resetAllData}>{resetting ? "Resetting…" : "Reset All Data"}</button>
             {bot?.pause_supported ? (
               <>
@@ -328,12 +332,11 @@ export default function App() {
               commands={commands}
               strategyFiles={strategyFiles}
               runtime={runtime}
-              onRefresh={async () => {
-                await loadBots();
-                await refresh();
-              }}
+              onRefresh={onRefresh}
               setError={setError}
               setNotice={setNotice}
+              onReset={onReset}
+              resetting={resetting}
             />
           )}
         </div>
@@ -500,6 +503,7 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
     }
   }
   return (
+    <div className="table-wrap">
     <table>
       <thead>
         <tr>
@@ -519,7 +523,7 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
             <td>{fmtPrice(open ? p.current_price : p.exit)}</td>
             <td>{fmtTps(p.tps, p.tp)}</td>
             <td>{fmtPrice(p.sl)}</td>
-            <td title={(p.hit_tps || []).join(" / ")}>{p.tp_hits || 0}/{p.tps_total || 0}</td>
+            <td title={fmtTps(p.hit_tps)}>{p.tp_hits || 0}/{p.tps_total || (p.tps || []).length || 0}</td>
             <td className={pnlClass(p.booked_pnl)}>{fmt(p.booked_pnl)}</td>
             <td className={pnlClass(open ? p.unrealized_pnl : p.realized_pnl)}>
               {fmt(open ? p.unrealized_pnl : p.realized_pnl)}
@@ -537,6 +541,7 @@ function PosTable({ rows, open, botId, onRefresh, setError, setNotice }) {
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -655,7 +660,7 @@ function Reports({ pnl, hourly, fourHour }) {
   );
 }
 
-function Settings({ bot, envVars, versions, changes, commands, strategyFiles, runtime, onRefresh, setError, setNotice }) {
+function Settings({ bot, envVars, versions, changes, commands, strategyFiles, runtime, onRefresh, setError, setNotice, onReset, resetting }) {
   const [mode, setMode] = useState(bot.trading_mode);
   const [entry, setEntry] = useState(bot.entry_point);
   const [key, setKey] = useState("");
@@ -800,7 +805,7 @@ function Settings({ bot, envVars, versions, changes, commands, strategyFiles, ru
           setNotice(`${r.warning} Saved to ${r.path}`);
         }}>Backup (secrets excluded)</button>
       </div>
-      <RuntimePanel bot={bot} runtime={runtime} onRefresh={onRefresh} setError={setError} setNotice={setNotice} />
+      <RuntimePanel bot={bot} runtime={runtime} onRefresh={onRefresh} setError={setError} setNotice={setNotice} onReset={onReset} resetting={resetting} />
       <StrategyPanel bot={bot} files={strategyFiles || []} onRefresh={onRefresh} setError={setError} setNotice={setNotice} />
     </div>
   );
@@ -816,7 +821,7 @@ function percentsForCount(count, current) {
   return out.join(",");
 }
 
-function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
+function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice, onReset, resetting }) {
   const [scanMode, setScanMode] = useState("ALL");
   const [symbols, setSymbols] = useState("");
   const [delay, setDelay] = useState(180);
@@ -829,16 +834,19 @@ function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
 
   useEffect(() => {
     if (!runtime) return;
-    if (loadedFor === bot.id) return;
-    setScanMode(runtime.scan_mode || "ALL");
-    setSymbols((runtime.symbols || []).join(","));
-    setDelay(runtime.startup_delay_seconds ?? 180);
-    setGap(runtime.trade_gap_seconds ?? 180);
-    setTpCount(runtime.tp_count ?? 2);
-    setTpPercents((runtime.tp_percents || [0.8, 1.6]).join(","));
-    setSl(runtime.sl_percent ?? 0.5);
-    setMaxOpen(runtime.max_open_positions ?? 3);
-    setLoadedFor(bot.id);
+    if (loadedFor !== bot.id) {
+      setScanMode(runtime.scan_mode || "ALL");
+      setSymbols((runtime.symbols || []).join(","));
+      setDelay(runtime.startup_delay_seconds ?? 180);
+      setGap(runtime.trade_gap_seconds ?? 180);
+      setTpCount(runtime.tp_count ?? 2);
+      setTpPercents((runtime.tp_percents || [0.8, 1.6]).join(","));
+      setSl(runtime.sl_percent ?? 0.5);
+      setMaxOpen(runtime.max_open_positions ?? 3);
+      setLoadedFor(bot.id);
+      return;
+    }
+    if (runtime.max_open_positions != null) setMaxOpen(runtime.max_open_positions);
   }, [bot.id, runtime, loadedFor]);
 
   async function persist(patch, notice) {
@@ -850,9 +858,9 @@ function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
       tp_count: Number(tpCount),
       tp_percents: tpPercents,
       sl_percent: Number(sl),
-      max_open_positions: Number(maxOpen),
       ...patch,
     };
+    if (body.max_open_positions == null) body.max_open_positions = Number(maxOpen);
     try {
       const saved = await api(`/api/bots/${bot.id}/runtime-settings`, {
         method: "POST",
@@ -902,7 +910,7 @@ function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
         <input type="number" min="0" value={delay} onChange={(e) => setDelay(e.target.value)} onBlur={() => persist({ startup_delay_seconds: Number(delay) }, `Startup delay ${delay}s`)} />
       </div>
       <label>Trade gap after close</label>
-      <p className="help">After a position closes, wait this long before opening a new one. Does not freeze or close an already open trade.</p>
+      <p className="help">Wait this long after an open or a close before the next new trade. Does not freeze or close an already open trade.</p>
       <div className="row">
         {[180, 300, 600].map((n) => (
           <button key={n} className={`btn ${Number(gap) === n ? "primary" : "ghost"}`} onClick={() => persist({ trade_gap_seconds: n }, `Trade gap ${n / 60} min`)}>{n / 60} min</button>
@@ -933,16 +941,7 @@ function RuntimePanel({ bot, runtime, onRefresh, setError, setNotice }) {
       </div>
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn primary" onClick={() => persist({ refresh_universe: true }, "Runtime settings saved. Restart the bot to apply.")}>Save runtime settings</button>
-        <button className="btn danger" onClick={async () => {
-          if (!window.confirm("Reset all signals, positions, trades, events, and logs for this bot?")) return;
-          try {
-            await api(`/api/bots/${bot.id}/reset-data`, { method: "POST", body: "{}" });
-            setNotice("Trading data reset.");
-            onRefresh();
-          } catch (e) {
-            setError(e.message);
-          }
-        }}>Reset all data</button>
+        <button className="btn danger" disabled={resetting} onClick={onReset}>{resetting ? "Resetting…" : "Reset all data"}</button>
       </div>
       <p className="muted">Delay and trade gap never close or block management of an already open position. Reset does not delete strategy files or secrets.</p>
     </div>

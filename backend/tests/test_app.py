@@ -541,6 +541,42 @@ def test_multi_tp_signal_and_position_ingestion(mock_bot_path):
         assert pos.booked_pnl == 0.0
 
 
+def test_position_update_does_not_overwrite_original_tps(mock_bot_path):
+    with session_scope() as s:
+        bot = _ready_bot(s, mock_bot_path, "Keep TPs Bot")
+        bid = bot["id"]
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "POSITION_OPENED",
+                "position_id": "keep-tps",
+                "symbol": "ETHUSDT",
+                "side": "LONG",
+                "entry": 100,
+                "tps": [101, 102, 103],
+                "sl": 95,
+                "quantity": 1,
+            },
+        )
+        services.ingest_event(
+            s,
+            bid,
+            {
+                "type": "POSITION_UPDATED",
+                "position_id": "keep-tps",
+                "current_price": 100.5,
+                "tps": [102, 103],
+                "remaining_tps": [102, 103],
+                "unrealized_pnl": 0.5,
+            },
+        )
+        pos = s.query(Position).filter(Position.bot_id == bid).one()
+        assert json.loads(pos.tps_json) == [101, 102, 103]
+        assert pos.tp == 103
+        assert pos.tps_total == 3
+
+
 def test_tp_hits_and_booked_pnl_tracking(mock_bot_path):
     with session_scope() as s:
         bot = _ready_bot(s, mock_bot_path, "TP Track Bot")

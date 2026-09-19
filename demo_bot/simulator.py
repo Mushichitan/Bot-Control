@@ -1,6 +1,20 @@
 import time
 
 
+def _price(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return value
+    if value >= 1000:
+        return round(value, 2)
+    if value >= 1:
+        return round(value, 4)
+    if value >= 0.01:
+        return round(value, 6)
+    return round(value, 8)
+
+
 def _signal_tps(s):
     tps = list(s.get("tps") or [])
     if tps:
@@ -122,7 +136,7 @@ class TradingSimulator:
             price = prices.get(p["symbol"])
             if price is None:
                 continue
-            p["current_price"] = round(price, 2)
+            p["current_price"] = _price(price)
             p["unrealized_pnl"] = round(self._pnl(p, price), 2)
             self.emit(
                 "POSITION_UPDATED",
@@ -133,7 +147,8 @@ class TradingSimulator:
                 entry=p["entry"],
                 current_price=p["current_price"],
                 tp=p["tp"],
-                tps=p.get("remaining_tps") or p.get("tps") or [],
+                tps=p.get("tps") or [],
+                remaining_tps=list(p.get("remaining_tps") or []),
                 hit_tps=list(p.get("hit_tps") or []),
                 tp_hits=p.get("tp_hits", 0),
                 tps_total=len(p.get("tps") or []),
@@ -173,9 +188,10 @@ class TradingSimulator:
             "symbol": p["symbol"],
             "side": p["side"],
             "entry": p["entry"],
-            "exit": round(price, 2),
+            "exit": _price(price),
             "tp": hit,
-            "tps": remaining,
+            "tps": p.get("tps") or [],
+            "remaining_tps": remaining,
             "hit_tps": list(p["hit_tps"]),
             "tp_hits": p["tp_hits"],
             "tps_total": len(p.get("tps") or []),
@@ -210,7 +226,7 @@ class TradingSimulator:
             "symbol": p["symbol"],
             "side": p["side"],
             "entry": p["entry"],
-            "exit": round(exit_price, 2),
+            "exit": _price(exit_price),
             "tp": p.get("tp"),
             "tps": p.get("tps") or [],
             "hit_tps": list(p.get("hit_tps") or []),

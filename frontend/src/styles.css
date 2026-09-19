@@ -67,7 +67,7 @@ body {
   border-bottom: 1px solid var(--line);
   background: rgba(11, 16, 32, 0.72);
 }
-.controls { display: flex; gap: 8px; align-items: center; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .page { padding: 22px; overflow: auto; }
 .reset-bar {
   display: flex;
@@ -78,7 +78,7 @@ body {
   border: 1px solid var(--red);
   background: linear-gradient(180deg, rgba(255, 93, 115, 0.16), var(--panel-2));
 }
-.reset-bar h3 { color: var(--text); font-size: 15px; margin: 0 0 4px; }
+.panel.reset-bar h3 { color: var(--text); font-size: 15px; margin: 0 0 4px; }
 .reset-bar .btn { flex: 0 0 auto; font-size: 14px; padding: 10px 16px; }
 .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
 .card, .panel {
@@ -92,8 +92,9 @@ body {
 .card .val { font-size: 22px; font-weight: 700; }
 .grid-2 { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--muted); font-weight: 600; }
 .badge {
   display: inline-flex;

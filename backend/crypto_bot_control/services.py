@@ -731,10 +731,6 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
             pos.pnl_pct = _num(payload.get("pnl_pct"))
         if payload.get("quantity") is not None:
             pos.quantity = _num(payload.get("quantity"))
-        extra_tps = _extract_tps(payload)
-        if extra_tps:
-            pos.tps_json = json.dumps(extra_tps)
-            pos.tp = extra_tps[-1]
         _apply_tp_tracking(pos, payload)
         return
     if t in {"TP_HIT", "SL_HIT", "POSITION_CLOSED"} and pos:
@@ -749,9 +745,6 @@ def _apply_trading_event(session: Session, bot_id: int, payload: dict) -> None:
         if partial and t == "TP_HIT":
             if payload.get("unrealized_pnl") is not None:
                 pos.unrealized_pnl = _num(payload.get("unrealized_pnl"))
-            extra_tps = _extract_tps(payload)
-            if extra_tps:
-                pos.tps_json = json.dumps(extra_tps)
             _apply_tp_tracking(pos, payload, hit=payload.get("tp"))
             return
         reason = "TP" if t == "TP_HIT" else "SL" if t == "SL_HIT" else str(payload.get("close_reason") or "MANUAL")
